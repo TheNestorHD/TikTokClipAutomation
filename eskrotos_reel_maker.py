@@ -20,15 +20,15 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 import cv2
-import math
 import json
 import time
 import shutil
 import tempfile
 import subprocess
 import numpy as np
+from datetime import datetime
+from fractions import Fraction
 from pathlib import Path
-from tqdm import tqdm
 
 # ============================================================
 # CONFIGURACIÓN - EDITÁ ESTO SI CAMBIÁS RUTAS
@@ -51,42 +51,55 @@ SUB_COLOR = "&H00FFFFFF"    # blanco (ASS BGR)
 SUB_BORDER = "&H00000000"   # negro
 SUB_BORDER_WIDTH = 12       # borde más grueso (antes 4)
 
-# Detección de cara
-FACE_PADDING = 0.90         # padding muy generoso alrededor de la cara
-FACE_PAD_RIGHT_EXTRA = 0.70 # extra grande a la derecha (la cara suele estar a la izquierda del panel)
-FACE_PAD_TOP_EXTRA = 0.25   # un poco más arriba (para incluir el borde superior del overlay)
-MIN_FACE_SIZE = 50
-SAMPLE_FRAMES = 8
+# Detección de facecam
+FACE_MAX_RETRIES_KIMI = 5
+FACE_FALLBACK_MODEL = "google/diffusiongemma-26b-a4b-it"
+FACE_KIMI_MODEL = "moonshotai/kimi-k3"
+FACE_KIMI_TIMEOUT = 130
+FACE_FALLBACK_TIMEOUT = 60
 
 # Whisper
-WHISPER_MODEL = "large-v3"  # más preciso (español). Alternativas: "medium", "small"
+WHISPER_MODEL = "large-v3"
 WHISPER_DEVICE = "auto"     # "cuda", "cpu" o "auto"
-WHISPER_COMPUTE = "default" # "float16", "int8", "default" (deja que elija)
+WHISPER_COMPUTE = "default" # "float16", "int8", "default"
+WHISPER_BACKEND = "auto"    # "auto", "faster-whisper" o "whisper.cpp"
+
+# whisper.cpp opcional: permite usar una build con ROCm/Vulkan en AMD.
+# Si no existe, el script mantiene faster-whisper con CUDA/CPU.
+WHISPER_CPP_EXE = Path(r"G:\tools\whisper.cpp\whisper-cli.exe")
+WHISPER_CPP_MODEL = Path(r"G:\tools\whisper.cpp\models\ggml-large-v3.bin")
+WHISPER_CPP_THREADS = max(2, min(8, os.cpu_count() or 8))
 
 # NVIDIA API
-# ⚠️ Regenerá la key después de probar (quedó expuesta en el chat)
+# ⚠️ Credencial de prueba de uso personal.
 NVIDIA_API_KEY = "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"
 NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-NVIDIA_MODEL = "moonshotai/kimi-k3"                      # visión / facecam (legacy)
-# Facecam (visión): se prueban en orden hasta que uno responda
-NVIDIA_MODELS_FACECAM = [
-    ("moonshotai/kimi-k3", 130),                         # preciso, a veces lento
-    ("google/diffusiongemma-26b-a4b-it", 60),             # fallback visión
-]
-# Auto-trim: primero Omni CON VIDEO; si falla, modelos de texto
+
+# Auto-trim: Nemotron Omni CON VIDEO
 NVIDIA_TRIM_OMNI = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 NVIDIA_TRIM_OMNI_TIMEOUT = 180
-NVIDIA_MODELS_TRIM_TEXT = [
-    "google/diffusiongemma-26b-a4b-it",
-    "nvidia/nemotron-3-ultra-550b-a55b",
-    "moonshotai/kimi-k3",
-]
 
 # Watcher de clips de Kick
-KICK_CHANNEL = "eskrotos"           # slug del canal
-KICK_POLL_SECONDS = 5               # cada cuántos segundos revisa
-KICK_DOWNLOAD_COOLDOWN = 45         # pausa tras empezar una descarga (anti-duplicados)
-SEEN_CLIPS_FILE = Path(r"G:\Clips\seen_clips.json")  # IDs ya vistos
+KICK_CHANNEL = "eskrotos"
+KICK_POLL_SECONDS = 5
+
+# Deduplicación: evita bajar varias veces el mismo momento capturado por usuarios distintos.
+DUPLICATE_WINDOW_SECONDS = 75
+DUPLICATE_PHASH_DISTANCE = 10
+DUPLICATE_DURATION_TOLERANCE = 20
+DUPLICATE_TITLE_WINDOW_SECONDS = 30
+DUPLICATE_THUMBNAIL_TIMEOUT = 8
+
+# Reintentos de fallos temporales
+FAILED_RETRY_SECONDS = 120
+
+# Registro persistente. Mantiene el mismo archivo que usaba la versión anterior.
+CLIP_REGISTRY_FILE = Path(r"G:\Clips\seen_clips.json")
+REGISTRY_MAX_ENTRIES = 500
+
+# Idempotencia
+SKIP_EXISTING_OUTPUT = True
+MIN_VALID_OUTPUT_BYTES = 10 * 1024
 
 # ============================================================
 # UTILIDADES
@@ -94,10 +107,6 @@ SEEN_CLIPS_FILE = Path(r"G:\Clips\seen_clips.json")  # IDs ya vistos
 
 def check_dependencies():
     missing = []
-    try:
-        import mediapipe
-    except ImportError:
-        missing.append("mediapipe")
     try:
         import cv2
     except ImportError:
@@ -157,7 +166,7 @@ def get_video_info(path: Path):
 
     width = int(video_stream["width"])
     height = int(video_stream["height"])
-    fps = eval(video_stream["r_frame_rate"])  # "30/1" → 30.0
+    fps = float(Fraction(video_stream["r_frame_rate"]))
     duration = float(data["format"]["duration"])
     return width, height, fps, duration
 
@@ -177,97 +186,10 @@ def extract_frame(video_path: Path, time_sec: float = 1.0) -> np.ndarray:
 # DETECCIÓN DE FACECAM
 # ============================================================
 
-def detect_facecam_auto(video_path: Path, orig_w: int, orig_h: int):
-    """
-    Detecta la facecam usando MediaPipe Face Detection.
-    Muestrea varios frames y promedia la bounding box más grande.
-    Retorna (x, y, w, h) o None si no encuentra nada confiable.
-    """
-    import mediapipe as mp
-
-    mp_face = mp.solutions.face_detection
-    detector = mp_face.FaceDetection(model_selection=1, min_detection_confidence=0.5)
-
-    width, height, fps, duration = get_video_info(video_path)
-    times = np.linspace(0.5, min(duration - 0.5, 8.0), SAMPLE_FRAMES)
-
-    boxes = []
-    for t in times:
-        frame = extract_frame(video_path, t)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = detector.process(rgb)
-
-        if results.detections:
-            # Elegimos la detección más grande (probablemente el streamer)
-            best = max(results.detections, key=lambda d: d.location_data.relative_bounding_box.width *
-                                                          d.location_data.relative_bounding_box.height)
-            bb = best.location_data.relative_bounding_box
-            x = int(bb.xmin * width)
-            y = int(bb.ymin * height)
-            w = int(bb.width * width)
-            h = int(bb.height * height)
-
-            if w >= MIN_FACE_SIZE and h >= MIN_FACE_SIZE:
-                boxes.append((x, y, w, h))
-
-    detector.close()
-
-    if not boxes:
-        return None
-
-    # Promedio
-    xs, ys, ws, hs = zip(*boxes)
-    x = int(np.mean(xs))
-    y = int(np.mean(ys))
-    w = int(np.mean(ws))
-    h = int(np.mean(hs))
-
-    # Padding muy generoso + extra a la derecha y un poco arriba
-    # (la cara suele estar a la izquierda del panel de la webcam)
-    pad_x = int(w * FACE_PADDING)
-    pad_y = int(h * FACE_PADDING)
-    pad_right_extra = int(w * FACE_PAD_RIGHT_EXTRA)
-    pad_top_extra = int(h * FACE_PAD_TOP_EXTRA)
-
-    x = max(0, x - pad_x)
-    y = max(0, y - pad_y - pad_top_extra)
-    w = min(orig_w - x, w + pad_x + pad_x + pad_right_extra)
-    h = min(orig_h - y, h + pad_y + pad_y + pad_top_extra)
-
-    # Evitar que se vaya demasiado horizontal, pero priorizando la derecha
-    aspect = w / max(h, 1)
-    if aspect > 1.85:
-        new_w = int(h * 1.55)
-        # Empujamos hacia la derecha (no centramos)
-        x = min(orig_w - new_w, x + (w - new_w))
-        w = new_w
-
-    if not is_valid_facecam_box(x, y, w, h, orig_w, orig_h):
-        return None
-    return (x, y, w, h)
-
-
-def is_valid_facecam_box(x, y, w, h, orig_w, orig_h) -> bool:
-    """
-    Rechaza cajas que producirían facecam deforme (línea de píxeles, estirada, etc.).
-    """
-    if w < 120 or h < 120:
-        return False
-    if x < 0 or y < 0 or x + w > orig_w + 2 or y + h > orig_h + 2:
-        return False
-    aspect = w / max(h, 1)
-    if aspect < 0.55 or aspect > 2.2:
-        return False
-    area_ratio = (w * h) / max(orig_w * orig_h, 1)
-    if area_ratio < 0.01 or area_ratio > 0.45:
-        return False
-    return True
-
-
 def detect_facecam_llm(video_path: Path, orig_w: int, orig_h: int, time_sec: float = 2.0):
     """
-    Localiza el panel de la facecam con modelos de visión (NVIDIA).
-    Prueba en orden: Kimi → DiffusionGemma. Devuelve (x, y, w, h) o None.
+    Localiza el panel de la facecam con visión.
+    Intenta Kimi hasta 5 veces; si las 5 fallan, cae a DiffusionGemma.
     """
     import base64
     import re
@@ -277,7 +199,6 @@ def detect_facecam_llm(video_path: Path, orig_w: int, orig_h: int, time_sec: flo
 
     frame = extract_frame(video_path, time_sec)
 
-    # Imagen chica = mucho más rápido y estable
     max_side = 640
     scale = min(1.0, max_side / max(orig_w, orig_h))
     new_w = max(1, int(orig_w * scale))
@@ -293,8 +214,7 @@ def detect_facecam_llm(video_path: Path, orig_w: int, orig_h: int, time_sec: flo
     prompt = (
         f"Kick stream screenshot {new_w}x{new_h}px.\n"
         "Find the streamer's facecam/webcam overlay panel (picture-in-picture).\n"
-        "It is a rectangular box (usually bottom-right) containing:\n"
-        "- streamer's face, red/colored border, username, optional anime decoration\n"
+        "It is a rectangular box containing the streamer's face and its full visual frame.\n"
         "IMPORTANT: Return a TIGHT bounding box that matches ONLY the panel itself.\n"
         "Do NOT include gameplay background outside the panel border.\n"
         "The box edges should align with the outer border of the facecam frame.\n"
@@ -305,112 +225,131 @@ def detect_facecam_llm(video_path: Path, orig_w: int, orig_h: int, time_sec: flo
     headers = {
         "Authorization": f"Bearer {NVIDIA_API_KEY}",
         "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Accept": "application/json",
     }
 
-    short_names = {
-        "moonshotai/kimi-k3": "Kimi",
-        "google/diffusiongemma-26b-a4b-it": "DiffusionGemma",
-    }
+    models = [
+        (FACE_KIMI_MODEL, "Kimi", FACE_KIMI_TIMEOUT, FACE_MAX_RETRIES_KIMI),
+        (FACE_FALLBACK_MODEL, "DiffusionGemma", FACE_FALLBACK_TIMEOUT, 1),
+    ]
 
-    for model_id, timeout_s in NVIDIA_MODELS_FACECAM:
-        name = short_names.get(model_id, model_id.split("/")[-1])
-        print(f"  🤖 Facecam con {name} (timeout {timeout_s}s)...")
+    for model_id, name, timeout_s, retries in models:
+        for attempt in range(1, retries + 1):
+            print(f"  🤖 Facecam con {name} — intento {attempt}/{retries} (timeout {timeout_s}s)...")
 
-        payload = {
-            "model": model_id,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
-                ]
-            }],
-            "max_tokens": 300,
-            "temperature": 0.0,
-            "stream": False
-        }
+            payload = {
+                "model": model_id,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                    ],
+                }],
+                "max_tokens": 300,
+                "temperature": 0.0,
+                "stream": False,
+            }
 
-        try:
-            r = requests.post(NVIDIA_API_URL, headers=headers, json=payload, timeout=timeout_s)
-            r.raise_for_status()
-            data = r.json()
-            msg = data["choices"][0]["message"]
-            content = (msg.get("content") or "").strip()
-            reasoning = msg.get("reasoning_content") or ""
+            try:
+                r = requests.post(
+                    NVIDIA_API_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout_s,
+                )
 
-            text = content + "\n" + reasoning
-            match = re.search(r'\{[^{}]*"x"\s*:\s*\d+[^{}]*\}', text)
-            if not match:
-                print(f"     ⚠️  {name} no devolvió JSON válido, siguiente...")
-                continue
+                if r.status_code in (429, 503):
+                    wait = min(30, 5 * attempt)
+                    print(f"     ⚠️  {name} HTTP {r.status_code}. Reintento en {wait}s...")
+                    time.sleep(wait)
+                    continue
 
-            box = json.loads(match.group(0))
-            x = int(box["x"])
-            y = int(box["y"])
-            w = int(box["width"])
-            h = int(box["height"])
+                r.raise_for_status()
+                data = r.json()
+                msg = data["choices"][0]["message"]
+                response_text = (msg.get("content") or "") + "\n" + (
+                    msg.get("reasoning_content") or ""
+                )
 
-            # Validación en la imagen chica
-            if w < 30 or h < 30 or x < 0 or y < 0:
-                print(f"     ⚠️  {name} box demasiado chico/negativo, siguiente...")
-                continue
+                match = re.search(
+                    r'\{[^{}]*"x"\s*:\s*-?\d+[^{}]*\}',
+                    response_text,
+                )
+                if not match:
+                    print(f"     ⚠️  {name} no devolvió JSON válido.")
+                    continue
 
-            # Escalar a resolución original
-            inv = 1.0 / scale if scale > 0 else 1.0
-            x = int(x * inv)
-            y = int(y * inv)
-            w = int(w * inv)
-            h = int(h * inv)
+                box = json.loads(match.group(0))
+                x = int(box["x"])
+                y = int(box["y"])
+                w = int(box["width"])
+                h = int(box["height"])
 
-            # Clamp al frame
-            x = max(0, min(x, orig_w - 2))
-            y = max(0, min(y, orig_h - 2))
-            w = max(2, min(w, orig_w - x))
-            h = max(2, min(h, orig_h - y))
+                if w < 30 or h < 30 or x < 0 or y < 0:
+                    print(f"     ⚠️  {name} devolvió una caja inválida.")
+                    continue
 
-            # Rechazar cajas deformes (línea de píxeles / estiradas)
-            aspect = w / max(h, 1)
-            area_ratio = (w * h) / max(orig_w * orig_h, 1)
-            if w < 120 or h < 120:
-                print(f"     ⚠️  {name} box muy chico ({w}x{h}), siguiente...")
-                continue
-            if aspect < 0.55 or aspect > 2.2:
-                print(f"     ⚠️  {name} aspect raro ({aspect:.2f}), siguiente...")
-                continue
-            if area_ratio > 0.45 or area_ratio < 0.01:
-                print(f"     ⚠️  {name} área rara ({area_ratio:.3f}), siguiente...")
-                continue
+                inv = 1.0 / scale if scale > 0 else 1.0
+                x = int(x * inv)
+                y = int(y * inv)
+                w = int(w * inv)
+                h = int(h * inv)
 
-            # Padding mínimo
-            pad_x = max(1, int(w * 0.01))
-            pad_y = max(1, int(h * 0.01))
-            x = max(0, x - pad_x)
-            y = max(0, y - pad_y)
-            w = min(orig_w - x, w + 2 * pad_x)
-            h = min(orig_h - y, h + 2 * pad_y)
+                x = max(0, min(x, orig_w - 2))
+                y = max(0, min(y, orig_h - 2))
+                w = max(2, min(w, orig_w - x))
+                h = max(2, min(h, orig_h - y))
 
-            print(f"  ✅ {name} detectó facecam: x={x} y={y} w={w} h={h}")
-            return (x, y, w, h)
+                aspect = w / max(h, 1)
+                area_ratio = (w * h) / max(orig_w * orig_h, 1)
+                if w < 120 or h < 120:
+                    print(f"     ⚠️  {name} box muy chica ({w}x{h}).")
+                    continue
+                if aspect < 0.55 or aspect > 2.2:
+                    print(f"     ⚠️  {name} aspect raro ({aspect:.2f}).")
+                    continue
+                if area_ratio > 0.45 or area_ratio < 0.01:
+                    print(f"     ⚠️  {name} área rara ({area_ratio:.3f}).")
+                    continue
 
-        except requests.exceptions.Timeout:
-            print(f"     ⚠️  Timeout de {name} (>{timeout_s}s), siguiente...")
-            continue
-        except Exception as e:
-            print(f"     ⚠️  Error con {name}: {e}")
-            continue
+                pad_x = max(1, int(w * 0.01))
+                pad_y = max(1, int(h * 0.01))
+                x = max(0, x - pad_x)
+                y = max(0, y - pad_y)
+                w = min(orig_w - x, w + 2 * pad_x)
+                h = min(orig_h - y, h + 2 * pad_y)
+
+                print(f"  ✅ {name} detectó facecam: x={x} y={y} w={w} h={h}")
+                return (x, y, w, h)
+
+            except requests.exceptions.Timeout:
+                print(f"     ⚠️  Timeout de {name}.")
+            except Exception as e:
+                print(f"     ⚠️  Error con {name}: {e}")
+
+        if model_id == FACE_KIMI_MODEL:
+            print("  ⚠️  Kimi falló 5 veces. Pasando a DiffusionGemma...")
 
     print("  ❌ Todos los modelos de visión fallaron para facecam.")
     return None
 
 
-def _make_trim_proxy(video_path: Path, max_sec: float = 60.0) -> Path | None:
-    """Proxy liviano 720p @ 1fps para Nemotron Omni (video)."""
-    import base64
-    out = Path(tempfile.gettempdir()) / "_eskrotos_trim_proxy.mp4"
+def _make_trim_proxy(video_path: Path, duration: float) -> tuple[Path, float, float] | None:
+    """
+    Crea un proxy de 720p a 1 FPS para Nemotron Omni.
+    Si el clip supera 120 s, usa los ÚLTIMOS 120 s del original.
+    Retorna (ruta, offset_original, duración_proxy).
+    """
+    max_sec = 120.0
+    proxy_duration = min(max_sec, duration)
+    source_offset = max(0.0, duration - max_sec)
+
+    out = Path(tempfile.gettempdir()) / f"_eskrotos_trim_proxy_{os.getpid()}.mp4"
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-t", str(max_sec),
+        "-ss", f"{source_offset:.3f}",
+        "-t", f"{proxy_duration:.3f}",
         "-i", str(video_path),
         "-vf", "fps=1,scale=-2:720",
         "-an",
@@ -418,10 +357,11 @@ def _make_trim_proxy(video_path: Path, max_sec: float = 60.0) -> Path | None:
         "-pix_fmt", "yuv420p",
         str(out),
     ]
+
     try:
         subprocess.run(cmd, check=True, timeout=120)
         if out.exists() and out.stat().st_size > 1000:
-            return out
+            return out, source_offset, proxy_duration
     except Exception as e:
         print(f"     ⚠️  No se pudo crear proxy para Omni: {e}")
     return None
@@ -429,136 +369,153 @@ def _make_trim_proxy(video_path: Path, max_sec: float = 60.0) -> Path | None:
 
 def suggest_trim_omni_video(video_path: Path, duration: float, max_retries: int = 5) -> tuple[float, float] | None:
     """
-    Auto-trim con Nemotron Omni VIENDO el video.
-    Reintenta varias veces si hay 503/429/timeout. NO usa Gemma.
+    Auto-trim con Nemotron Omni viendo un proxy de 720p a 1 FPS.
+    Para clips >120 s, el proxy corresponde a los últimos 120 s del original.
     """
-    import re
     import base64
+    import re
     import requests
 
-    print(f"  🤖 Auto-trim con Nemotron Omni (video)...")
-    proxy = _make_trim_proxy(video_path, max_sec=min(60.0, duration + 1))
-    if proxy is None:
+    print("  🤖 Auto-trim con Nemotron Omni (video)...")
+    proxy_data = _make_trim_proxy(video_path, duration)
+    if proxy_data is None:
         return None
+
+    proxy, source_offset, proxy_duration = proxy_data
 
     try:
         b64 = base64.b64encode(proxy.read_bytes()).decode("utf-8")
         data_url = f"data:video/mp4;base64,{b64}"
-    except Exception as e:
-        print(f"     ⚠️  Error leyendo proxy: {e}")
-        return None
 
-    prompt = f"""Sos editor de Reels virales del streamer argentino "Eskrotos" (Kick).
+        prompt = f"""Sos editor de Reels virales del streamer argentino "Eskrotos" (Kick).
 Estilo: humor absurdo, reacciones exageradas, sarcasmo, fallos épicos, punchlines.
 
-Estás VIENDO el clip (proxy ~{min(duration, 60):.0f}s). Duración real del original: {duration:.1f}s.
+Estás VIENDO un proxy de 720p a 1 FPS.
+El proxy representa desde {source_offset:.1f}s hasta {source_offset + proxy_duration:.1f}s del clip original.
+Duración real del original: {duration:.1f}s.
 
-Elegí el tramo MÁS viral para un Reel de TikTok:
+Elegí el tramo MÁS viral para un Reel de TikTok.
 
-REGLAS DE DURACIÓN (obligatorio):
+REGLAS DE DURACIÓN:
 - Largo IDEAL: 15 a 20 segundos.
-- Mínimo: 12 segundos (si el original es más corto, usá todo).
-- Máximo: el clip completo ({duration:.1f}s) si hace falta.
+- Mínimo: 12 segundos si el material lo permite.
+- Máximo: el clip completo si hace falta.
 - NUNCA cortes solo el clímax. Incluí contexto:
-  * 3–6s ANTES del momento clave (setup / jugada / frase que arma el chiste)
+  * 3–6s ANTES del momento clave
   * el momento principal
-  * 2–5s DESPUÉS (reacción, celebración, comentario del streamer)
-- Mal ejemplo: solo la celebración de un gol (7s sin contexto).
-- Bien: jugada → gol → celebración + reacción (~15–20s).
-- Si el mejor momento necesita más de 20s o casi todo el video, devolvé el tramo largo o start=0 y end={duration:.1f}.
+  * 2–5s DESPUÉS
+- Si el mejor momento necesita más de 20s, devolvé el tramo largo.
+- Los tiempos que devuelvas deben ser RELATIVOS AL PROXY, no al original.
 
 Respondé SOLO este JSON:
 {{"start": 10.0, "end": 28.0, "reason": "motivo corto"}}
 """
 
-    headers = {
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    payload = {
-        "model": NVIDIA_TRIM_OMNI,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "video_url", "video_url": {"url": data_url}},
-                {"type": "text", "text": prompt},
-            ],
-        }],
-        "max_tokens": 300,
-        "temperature": 0.2,
-        "stream": False,
-    }
+        headers = {
+            "Authorization": f"Bearer {NVIDIA_API_KEY}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload = {
+            "model": NVIDIA_TRIM_OMNI,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "video_url", "video_url": {"url": data_url}},
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+            "max_tokens": 300,
+            "temperature": 0.2,
+            "stream": False,
+        }
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            print(f"     Intento {attempt}/{max_retries}...")
-            r = requests.post(
-                NVIDIA_API_URL, headers=headers, json=payload,
-                timeout=NVIDIA_TRIM_OMNI_TIMEOUT,
-            )
-            if r.status_code in (503, 429):
-                wait = min(60, 10 * attempt)
-                print(f"     ⚠️  Omni saturado (HTTP {r.status_code}). Espero {wait}s...")
-                time.sleep(wait)
-                continue
-            if r.status_code != 200:
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"     Intento {attempt}/{max_retries}...")
+                r = requests.post(
+                    NVIDIA_API_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=NVIDIA_TRIM_OMNI_TIMEOUT,
+                )
+
+                if r.status_code in (429, 503):
+                    wait = min(60, 10 * attempt)
+                    print(f"     ⚠️  Omni HTTP {r.status_code}. Espero {wait}s...")
+                    time.sleep(wait)
+                    continue
+
+                if r.status_code != 200:
+                    wait = min(30, 5 * attempt)
+                    print(f"     ⚠️  Omni HTTP {r.status_code}. Espero {wait}s...")
+                    time.sleep(wait)
+                    continue
+
+                data = r.json()
+                msg = data["choices"][0]["message"]
+                response_text = (msg.get("content") or "") + "\n" + (
+                    msg.get("reasoning_content") or msg.get("reasoning") or ""
+                )
+
+                match = re.search(
+                    r'\{[^{}]*"start"\s*:\s*-?[\d.]+[^{}]*\}',
+                    response_text,
+                    re.DOTALL,
+                )
+                if not match:
+                    print("     ⚠️  Omni sin JSON válido. Reintento...")
+                    time.sleep(4)
+                    continue
+
+                obj = json.loads(match.group(0))
+                proxy_start = max(0.0, min(float(obj["start"]), proxy_duration - 1.0))
+                proxy_end = max(
+                    proxy_start + 3.0,
+                    min(float(obj["end"]), proxy_duration),
+                )
+
+                start = max(0.0, min(source_offset + proxy_start, duration - 1.0))
+                end = max(start + 3.0, min(source_offset + proxy_end, duration))
+
+                min_len = min(12.0, duration)
+                if end - start < min_len and duration >= min_len:
+                    extra = min_len - (end - start)
+                    back = min(start, extra * 0.6)
+                    start -= back
+                    end = min(duration, end + (extra - back))
+                    if end - start < min_len:
+                        start = max(0.0, end - min_len)
+                    if end - start < min_len:
+                        end = min(duration, start + min_len)
+
+                reason = obj.get("reason", "")
+                print(f"  ✅ Omni (video): {start:.1f}s → {end:.1f}s ({end-start:.1f}s)")
+                if reason:
+                    print(f"     Motivo: {reason}")
+                return (start, end)
+
+            except requests.exceptions.Timeout:
                 wait = min(30, 5 * attempt)
-                print(f"     ⚠️  Omni HTTP {r.status_code}. Espero {wait}s...")
+                print(f"     ⚠️  Timeout Omni. Espero {wait}s...")
                 time.sleep(wait)
-                continue
+            except Exception as e:
+                wait = min(20, 4 * attempt)
+                print(f"     ⚠️  Error Omni: {e}. Espero {wait}s...")
+                time.sleep(wait)
 
-            data = r.json()
-            msg = data["choices"][0]["message"]
-            text = (msg.get("content") or "") + "\n" + (
-                msg.get("reasoning_content") or msg.get("reasoning") or ""
-            )
-            match = re.search(r'\{[^{}]*"start"\s*:\s*[\d.]+[^{}]*\}', text, re.DOTALL)
-            if not match:
-                print("     ⚠️  Omni sin JSON válido. Reintento...")
-                time.sleep(4)
-                continue
+        print("  ❌ Omni no respondió tras varios reintentos.")
+        return None
 
-            obj = json.loads(match.group(0))
-            start = max(0.0, min(float(obj["start"]), duration - 1.0))
-            end = max(start + 3.0, min(float(obj["end"]), duration))
-            # Preferir tramos con contexto: si quedó muy corto, extender hacia atrás/adelante
-            min_len = min(12.0, duration)
-            if end - start < min_len and duration >= min_len:
-                extra = min_len - (end - start)
-                # 60% del extra hacia atrás (contexto), 40% hacia adelante (reacción)
-                back = min(start, extra * 0.6)
-                start = start - back
-                end = min(duration, end + (extra - back))
-                # Si aún falta, comer del otro lado
-                if end - start < min_len:
-                    start = max(0.0, end - min_len)
-                if end - start < min_len:
-                    end = min(duration, start + min_len)
-            reason = obj.get("reason", "")
-            print(f"  ✅ Omni (video): {start:.1f}s → {end:.1f}s ({end-start:.1f}s)")
-            if reason:
-                print(f"     Motivo: {reason}")
-            return (start, end)
-
-        except requests.exceptions.Timeout:
-            wait = min(30, 5 * attempt)
-            print(f"     ⚠️  Timeout Omni. Espero {wait}s...")
-            time.sleep(wait)
-        except Exception as e:
-            wait = min(20, 4 * attempt)
-            print(f"     ⚠️  Error Omni: {e}. Espero {wait}s...")
-            time.sleep(wait)
-
-    print("  ❌ Omni no respondió tras varios reintentos (sin fallback a Gemma).")
-    return None
+    finally:
+        try:
+            proxy.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
-def suggest_trim_llm(words: list, duration: float, video_path: Path | None = None) -> tuple[float, float] | None:
-    """
-    Auto-trim SOLO con Nemotron Omni (video). Reintenta si falla.
-    Si Omni no da resultado, devuelve None → en interactivo podés marcar a mano.
-    """
+def suggest_trim_llm(duration: float, video_path: Path | None = None) -> tuple[float, float] | None:
+    """Punto de entrada al auto-trim; actualmente usa únicamente Nemotron Omni."""
     if video_path is not None and video_path.exists():
         return suggest_trim_omni_video(video_path, duration)
 
@@ -889,7 +846,7 @@ _WHISPER_MODEL_NAME = None
 
 
 def _load_whisper_model():
-    """Carga Whisper una sola vez. Si large-v3 falla (symlinks Windows), cae a medium."""
+    """Carga faster-whisper una sola vez."""
     global _WHISPER_MODEL_INSTANCE, _WHISPER_MODEL_NAME
     from faster_whisper import WhisperModel
 
@@ -898,12 +855,14 @@ def _load_whisper_model():
 
     device = WHISPER_DEVICE
     compute = WHISPER_COMPUTE
+
     if device == "auto":
         try:
-            import torch
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        except ImportError:
+            import ctranslate2
+            device = "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+        except Exception:
             device = "cpu"
+
     if compute == "default":
         compute = "float16" if device == "cuda" else "int8"
 
@@ -922,24 +881,16 @@ def _load_whisper_model():
             _WHISPER_MODEL_NAME = name
             print(f"  ✅ Whisper '{name}' listo")
             return model, name
-        except OSError as e:
-            # WinError 1314 u otros problemas de descarga/symlinks
-            print(f"  ⚠️  No se pudo cargar '{name}': {e}")
-            last_err = e
-            continue
         except Exception as e:
             print(f"  ⚠️  Error cargando '{name}': {e}")
             last_err = e
-            continue
 
     raise RuntimeError(f"No se pudo cargar ningún modelo Whisper. Último error: {last_err}")
 
 
 def _extract_audio_for_whisper(video_path: Path) -> Path:
-    """
-    Extrae audio mono 16kHz normalizado (menos música/juego = menos alucinaciones).
-    """
-    out = Path(tempfile.gettempdir()) / "_eskrotos_whisper_audio.wav"
+    """Extrae audio mono 16 kHz normalizado para Whisper."""
+    out = Path(tempfile.gettempdir()) / f"_eskrotos_whisper_audio_{os.getpid()}.wav"
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(video_path),
@@ -953,25 +904,166 @@ def _extract_audio_for_whisper(video_path: Path) -> Path:
     return out
 
 
-def transcribe_video(video_path: Path):
-    """
-    Transcribe con faster-whisper y devuelve lista de palabras con timestamps.
-    Cada item: {"word": str, "start": float, "end": float}
-    """
-    model, model_name = _load_whisper_model()
-    print(f"  🎙️  Transcribiendo con Whisper ({model_name})...")
+def _clean_transcribed_words(words: list[dict]) -> list[dict]:
+    """Limpia palabras de alucinaciones obvias y duraciones absurdas."""
+    hallucination_words = {
+        "videos", "video", "subscribe", "suscribete", "suscríbete",
+        "thanks", "thank", "you", "www", "http", "com", "music",
+        "subtitulos", "subtítulos", "subtitles", "copyright",
+    }
 
-    # Audio limpio → menos "VIDEOS!" / basura por música del juego
-    try:
-        audio_path = _extract_audio_for_whisper(video_path)
-        audio_src = str(audio_path)
-        print("     Audio pre-procesado (mono 16k + loudnorm)")
-    except Exception as e:
-        print(f"     ⚠️  No se pudo pre-procesar audio ({e}), uso el video directo")
-        audio_src = str(video_path)
+    cleaned = []
+    for w in words:
+        text_value = w["word"].strip()
+        if not text_value:
+            continue
+        if text_value.lower().strip(".,!?¡¿\"'") in hallucination_words:
+            continue
+
+        probability = w.get("probability")
+        if probability is not None and probability < 0.35:
+            continue
+
+        start = float(w["start"])
+        end = float(w["end"])
+        if end <= start:
+            end = start + 0.12
+        elif end - start > 2.5:
+            end = start + 0.45
+
+        cleaned.append({
+            "word": text_value,
+            "start": start,
+            "end": end,
+            "probability": probability,
+        })
+
+    return cleaned
+
+
+def _parse_timecode(value: str) -> float:
+    value = value.replace(",", ".")
+    h, m, s = value.split(":")
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+def _parse_whisper_cpp_json(json_path: Path) -> list[dict]:
+    """
+    Convierte el JSON full de whisper.cpp en palabras con timestamps.
+    Agrupa tokens BPE en palabras según los espacios iniciales.
+    """
+    data = json.loads(json_path.read_text(encoding="utf-8"))
+    raw_words = []
+
+    for segment in data.get("transcription", []):
+        current = []
+        current_start = None
+        current_end = None
+        current_probs = []
+
+        for token in segment.get("tokens", []):
+            raw = str(token.get("text") or "")
+            if not raw or raw.startswith("[_"):
+                continue
+
+            ts = token.get("timestamps") or {}
+            try:
+                start = _parse_timecode(str(ts["from"]))
+                end = _parse_timecode(str(ts["to"]))
+            except Exception:
+                continue
+
+            probability = token.get("probability", token.get("p"))
+            try:
+                probability = float(probability) if probability is not None else None
+            except (TypeError, ValueError):
+                probability = None
+
+            if raw[:1].isspace() and current:
+                raw_words.append({
+                    "word": "".join(current),
+                    "start": current_start,
+                    "end": current_end,
+                    "probability": min(current_probs) if current_probs else None,
+                })
+                current = []
+                current_start = None
+                current_end = None
+                current_probs = []
+
+            if current_start is None:
+                current_start = start
+            current.append(raw.strip() if not current else raw)
+            current_end = end
+            if probability is not None:
+                current_probs.append(probability)
+
+        if current:
+            raw_words.append({
+                "word": "".join(current),
+                "start": current_start,
+                "end": current_end,
+                "probability": min(current_probs) if current_probs else None,
+            })
+
+    return _clean_transcribed_words(raw_words)
+
+
+def _transcribe_with_whisper_cpp(audio_path: Path) -> tuple[list[dict], str]:
+    """Usa whisper.cpp cuando está configurado y sus archivos existen."""
+    if not WHISPER_CPP_EXE.exists():
+        raise FileNotFoundError(f"No existe whisper-cli: {WHISPER_CPP_EXE}")
+    if not WHISPER_CPP_MODEL.exists():
+        raise FileNotFoundError(f"No existe el modelo whisper.cpp: {WHISPER_CPP_MODEL}")
+
+    with tempfile.TemporaryDirectory(prefix="eskrotos_whisper_") as temp_dir:
+        output_prefix = Path(temp_dir) / "result"
+
+        cmd = [
+            str(WHISPER_CPP_EXE),
+            "-m", str(WHISPER_CPP_MODEL),
+            "-f", str(audio_path),
+            "-l", "es",
+            "-ojf",
+            "-np",
+            "-of", str(output_prefix),
+            "-bs", "5",
+            "-bo", "5",
+            "-tp", "0.0",
+            "-t", str(WHISPER_CPP_THREADS),
+            "--prompt",
+            (
+                "Streamer argentino en Kick jugando. Habla español rioplatense. "
+                "Ejemplos: mirá este, la patada que se comió, boludo, qué carajo, "
+                "no puede ser, se la comió, re zarpado, pará pará."
+            ),
+        ]
+
+        subprocess.run(
+            cmd,
+            check=True,
+            timeout=180,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        json_path = output_prefix.with_suffix(".json")
+        if not json_path.exists():
+            raise RuntimeError(f"whisper.cpp no generó JSON: {json_path}")
+
+        words = _parse_whisper_cpp_json(json_path)
+        return words, "whisper.cpp"
+
+
+def _transcribe_with_faster_whisper(audio_path: Path) -> tuple[list[dict], str]:
+    model, model_name = _load_whisper_model()
+    print(f"  🎙️  Transcribiendo con faster-whisper ({model_name})...")
 
     segments, info = model.transcribe(
-        audio_src,
+        str(audio_path),
         language="es",
         task="transcribe",
         word_timestamps=True,
@@ -983,9 +1075,7 @@ def transcribe_video(video_path: Path):
         ),
         beam_size=5,
         best_of=5,
-        # temperature en lista: si alucina con 0.0, prueba valores más altos
         temperature=[0.0, 0.2, 0.4],
-        # False reduce alucinaciones en clips cortos con mucho ruido
         condition_on_previous_text=False,
         no_speech_threshold=0.55,
         compression_ratio_threshold=2.4,
@@ -997,112 +1087,68 @@ def transcribe_video(video_path: Path):
         ),
     )
 
-    # Palabras basura típicas de alucinación de Whisper
-    HALLUCINATION_WORDS = {
-        "videos", "video", "subscribe", "suscribete", "suscríbete",
-        "thanks", "thank", "you", "www", "http", "com", "music",
-        "subtitulos", "subtítulos", "subtitles", "copyright",
-    }
-
     words = []
     for seg in segments:
         if seg.words:
-            for w in seg.words:
-                text = w.word.strip()
-                if not text:
-                    continue
-                # Filtrar alucinaciones obvias
-                if text.lower().strip(".,!?¡¿\"'") in HALLUCINATION_WORDS:
-                    continue
-                # Filtrar tokens casi sin confianza si existe
-                if hasattr(w, "probability") and w.probability is not None:
-                    if w.probability < 0.35:
-                        continue
+            for word in seg.words:
                 words.append({
-                    "word": text,
-                    "start": float(w.start),
-                    "end": float(w.end),
+                    "word": word.word.strip(),
+                    "start": float(word.start),
+                    "end": float(word.end),
+                    "probability": getattr(word, "probability", None),
                 })
 
-    cleaned = []
-    for w in words:
-        dur = w["end"] - w["start"]
-        if dur <= 0:
-            w["end"] = w["start"] + 0.12
-        elif dur > 2.5:
-            w["end"] = w["start"] + 0.45
-        cleaned.append(w)
-
-    # Preview de lo que entendió
-    preview = " ".join(w["word"] for w in cleaned[:25])
-    if preview:
-        print(f"     Preview: {preview}{'...' if len(cleaned) > 25 else ''}")
-    print(f"  ✅ {len(cleaned)} palabras detectadas")
-    return cleaned
+    return _clean_transcribed_words(words), model_name
 
 
-def create_ass_file(words, ass_path: Path, video_w: int, video_h: int, text_y: int):
-    """
-    Subtítulos palabra por palabra, SIN efectos.
-    Cada palabra vive solo entre su start y end (no queda flotando en silencios).
-    """
-    header = f"""[Script Info]
-Title: Eskrotos Reel Subs
-ScriptType: v4.00+
-WrapStyle: 0
-ScaledBorderAndShadow: yes
-YCbCr Matrix: TV.709
-PlayResX: {video_w}
-PlayResY: {video_h}
+def transcribe_video(video_path: Path):
+    """Transcribe un clip usando whisper.cpp opcional o faster-whisper."""
+    audio_path = None
 
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,TF2 Build,{SUB_SIZE},{SUB_COLOR},&H000000FF,{SUB_BORDER},&H80000000,-1,0,0,0,100,100,0,0,1,{SUB_BORDER_WIDTH},0,8,0,0,0,1
+    try:
+        audio_path = _extract_audio_for_whisper(video_path)
+        print("     Audio pre-procesado (mono 16k + loudnorm)")
+    except Exception as e:
+        print(f"     ⚠️  No se pudo pre-procesar audio ({e})")
+        audio_path = video_path
 
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
+    try:
+        use_cpp = (
+            WHISPER_BACKEND == "whisper.cpp"
+            or (
+                WHISPER_BACKEND == "auto"
+                and WHISPER_CPP_EXE.exists()
+                and WHISPER_CPP_MODEL.exists()
+            )
+        )
 
-    def sec_to_ass(t):
-        t = max(0.0, float(t))
-        h = int(t // 3600)
-        m = int((t % 3600) // 60)
-        s = t % 60
-        return f"{h}:{m:02d}:{s:05.2f}"
+        if use_cpp:
+            try:
+                print("  🚀 Whisper backend: whisper.cpp")
+                words, model_name = _transcribe_with_whisper_cpp(audio_path)
+            except Exception as e:
+                print(f"  ⚠️  whisper.cpp falló: {e}. Fallback a faster-whisper...")
+                words, model_name = _transcribe_with_faster_whisper(audio_path)
+        else:
+            print("  🚀 Whisper backend: faster-whisper")
+            words, model_name = _transcribe_with_faster_whisper(audio_path)
 
-    events = []
-    center_x = video_w // 2
-    # Posición fija, sin fade/scale
-    pos = r"{\pos(" + str(center_x) + "," + str(text_y) + r")}"
+        preview = " ".join(w["word"] for w in words[:25])
+        if preview:
+            print(f"     Preview: {preview}{'...' if len(words) > 25 else ''}")
+        print(f"  ✅ {len(words)} palabras detectadas ({model_name})")
+        return words
 
-    i = 0
-    while i < len(words):
-        group = words[i:i + SUB_MAX_WORDS]
-        start = float(group[0]["start"])
-        end = float(group[-1]["end"])
-
-        # Duración mínima legible, pero sin extenderse al silencio
-        if end - start < 0.08:
-            end = start + 0.08
-        # No solapar mucho con la siguiente palabra
-        if i + SUB_MAX_WORDS < len(words):
-            next_start = float(words[i + SUB_MAX_WORDS]["start"])
-            if end > next_start - 0.02:
-                end = max(start + 0.06, next_start - 0.02)
-
-        full_text = " ".join(w["word"] for w in group)
-        line = f"Dialogue: 0,{sec_to_ass(start)},{sec_to_ass(end)},Default,,0,0,0,,{pos}{full_text}\n"
-        events.append(line)
-        i += SUB_MAX_WORDS
-
-    with open(ass_path, "w", encoding="utf-8-sig") as f:
-        f.write(header)
-        f.writelines(events)
-
-    return ass_path
+    finally:
+        if audio_path is not None and audio_path != video_path:
+            try:
+                audio_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 # ============================================================
+# PROCESAMIENTO CON FFMPEG# ============================================================
 # PROCESAMIENTO CON FFMPEG
 # ============================================================
 
@@ -1247,6 +1293,22 @@ def build_ffmpeg_cmd(
     return cmd
 
 
+def move_to_used(video_path: Path) -> Path | None:
+    """Mueve el clip original a Usados y evita colisiones de nombres."""
+    try:
+        USED_DIR.mkdir(parents=True, exist_ok=True)
+        dest = USED_DIR / video_path.name
+        if dest.exists():
+            stem, suffix = video_path.stem, video_path.suffix
+            dest = USED_DIR / f"{stem}_done{suffix}"
+        shutil.move(str(video_path), str(dest))
+        print(f"  📦 Original movido a: {dest}")
+        return dest
+    except Exception as e:
+        print(f"  ⚠️  No se pudo mover el original a Usados: {e}")
+        return None
+
+
 def process_one_clip(video_path: Path, interactive: bool = True):
     """
     Procesa un solo clip de principio a fin.
@@ -1258,13 +1320,18 @@ def process_one_clip(video_path: Path, interactive: bool = True):
     orig_w, orig_h, fps, duration = get_video_info(video_path)
     print(f"  Resolución original: {orig_w}x{orig_h} | {duration:.1f}s | {fps:.2f} fps")
 
+    output_path = OUTPUT_DIR / f"reel_{video_path.stem}.mp4"
+    if SKIP_EXISTING_OUTPUT and output_path.exists() and output_path.stat().st_size >= MIN_VALID_OUTPUT_BYTES:
+        print(f"  ⏭️  El Reel ya existe: {output_path.name}")
+        move_to_used(video_path)
+        return True
+
     # ---- 1. Seleccionar facecam ----
     box = None
     if interactive:
         print("\n  📷 Selección de FACECAM")
         print("  1 = Manual")
-        print("  2 = Automática (MediaPipe)")
-        print("  3 = LLM (Kimi → DiffusionGemma)  ← recomendado")
+        print("  2 = LLM (Kimi x5 → DiffusionGemma)  ← recomendado")
         print("  S = Saltar este clip")
         choice = input("  Elegí [1/2/3/S] (default 3): ").strip().lower() or "3"
 
@@ -1272,18 +1339,9 @@ def process_one_clip(video_path: Path, interactive: bool = True):
             print("  ⏭️  Saltado.")
             return False
         elif choice == "2":
-            print("  🔍 Buscando facecam con MediaPipe...")
-            box = detect_facecam_auto(video_path, orig_w, orig_h)
-            if box is None:
-                print("  ⚠️  No se detectó. Pasando a manual...")
-                box = manual_select_facecam(video_path)
-        elif choice == "3":
             box = detect_facecam_llm(video_path, orig_w, orig_h)
             if box is None:
-                print("  ⚠️  LLMs fallaron. Intentando MediaPipe...")
-                box = detect_facecam_auto(video_path, orig_w, orig_h)
-            if box is None:
-                print("  ⚠️  Nada funcionó. Pasando a manual...")
+                print("  ⚠️  No se pudo detectar automáticamente. Pasando a manual...")
                 box = manual_select_facecam(video_path)
         else:
             box = manual_select_facecam(video_path)
@@ -1312,11 +1370,8 @@ def process_one_clip(video_path: Path, interactive: bool = True):
             print("  ❌ Cancelado. Saltando clip.")
             return False
     else:
-        # Modo no-interactivo: intenta LLM → MediaPipe
+        # Modo no-interactivo: Kimi x5 → DiffusionGemma.
         box = detect_facecam_llm(video_path, orig_w, orig_h)
-        if box is None:
-            print("  🔍 Fallback MediaPipe...")
-            box = detect_facecam_auto(video_path, orig_w, orig_h)
         if box is None or not is_valid_facecam_box(*box, orig_w, orig_h):
             print("  ❌ No se detectó facecam válida. Saltando.")
             return False
@@ -1351,17 +1406,17 @@ def process_one_clip(video_path: Path, interactive: bool = True):
     if not words:
         print("  ⚠️  No se detectó habla. Se generará el video sin subtítulos.")
 
-    # ---- 3. Trim (auto Kimi + opcional ajuste manual) ----
+    # ---- 3. Trim (auto Omni + opcional ajuste manual) ----
     start_sec = 0.0
     end_sec = duration
 
-    suggested = suggest_trim_llm(words, duration, video_path=video_path)
+    suggested = suggest_trim_llm(duration, video_path=video_path)
     if suggested:
         start_sec, end_sec = suggested
 
     if interactive:
         if suggested:
-            print(f"\n  ⏱️  Gemma sugiere: {start_sec:.1f}s → {end_sec:.1f}s ({end_sec-start_sec:.1f}s)")
+            print(f"\n  ⏱️  Omni sugiere: {start_sec:.1f}s → {end_sec:.1f}s ({end_sec-start_sec:.1f}s)")
             print("  Opciones:")
             print("    Enter = usar sugerencia de Gemma")
             print("    M     = ajustar manualmente en el player")
@@ -1373,7 +1428,7 @@ def process_one_clip(video_path: Path, interactive: bool = True):
                 start_sec, end_sec = 0.0, duration
                 print("  → Clip completo")
             else:
-                print(f"  → Usando Gemma: {start_sec:.1f}s → {end_sec:.1f}s")
+                print(f"  → Usando Omni: {start_sec:.1f}s → {end_sec:.1f}s")
         else:
             print("\n  ⏱️  Gemma no pudo sugerir trim. Opciones:")
             print("    M = elegir en el player")
@@ -1386,7 +1441,7 @@ def process_one_clip(video_path: Path, interactive: bool = True):
                 print("  → Clip completo")
     else:
         if suggested:
-            print(f"  → Auto-trim Gemma: {start_sec:.1f}s → {end_sec:.1f}s")
+            print(f"  → Auto-trim Omni: {start_sec:.1f}s → {end_sec:.1f}s")
         else:
             print("  → Sin sugerencia de trim, usando clip completo")
 
@@ -1461,16 +1516,7 @@ def process_one_clip(video_path: Path, interactive: bool = True):
         print(f"  ✅ Guardado: {output_path}")
 
         # Mover original a Clips/Usados
-        try:
-            USED_DIR.mkdir(parents=True, exist_ok=True)
-            dest = USED_DIR / video_path.name
-            if dest.exists():
-                stem, suf = video_path.stem, video_path.suffix
-                dest = USED_DIR / f"{stem}_done{suf}"
-            shutil.move(str(video_path), str(dest))
-            print(f"  📦 Original movido a: {dest}")
-        except Exception as e:
-            print(f"  ⚠️  No se pudo mover el original a Usados: {e}")
+        move_to_used(video_path)
 
         return True
 
@@ -1491,25 +1537,244 @@ def process_one_clip(video_path: Path, interactive: bool = True):
 # WATCHER DE CLIPS DE KICK
 # ============================================================
 
-def load_seen_clips() -> set:
-    if SEEN_CLIPS_FILE.exists():
-        try:
-            with open(SEEN_CLIPS_FILE, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception:
-            return set()
-    return set()
+def _parse_clip_timestamp(value: str | None) -> float | None:
+    """Convierte un timestamp ISO de Kick a epoch."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return None
 
 
-def save_seen_clips(seen: set):
-    SEEN_CLIPS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(SEEN_CLIPS_FILE, "w", encoding="utf-8") as f:
-        json.dump(sorted(seen), f, indent=2)
+def _clip_stream_identity(clip: dict) -> str | None:
+    """Identidad del VOD/livestream al que pertenece el clip."""
+    livestream_id = clip.get("livestream_id")
+    if livestream_id:
+        return f"live:{livestream_id}"
+
+    vod = clip.get("vod")
+    if isinstance(vod, dict) and vod.get("id"):
+        return f"vod:{vod['id']}"
+
+    channel_id = clip.get("channel_id")
+    if channel_id:
+        return f"channel:{channel_id}"
+
+    return None
 
 
-def fetch_kick_clips(channel: str = KICK_CHANNEL, limit: int = 20) -> list:
+def _compute_thumbnail_phash(url: str | None) -> str | None:
+    """Genera un pHash de 64 bits sobre la miniatura del clip."""
+    if not url:
+        return None
+
+    import requests
+
+    try:
+        response = requests.get(
+            url,
+            timeout=DUPLICATE_THUMBNAIL_TIMEOUT,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        response.raise_for_status()
+
+        data = np.frombuffer(response.content, dtype=np.uint8)
+        image = cv2.imdecode(data, cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            return None
+
+        image = cv2.resize(image, (32, 32), interpolation=cv2.INTER_AREA).astype(np.float32)
+        dct = cv2.dct(image)[:8, :8]
+        median = float(np.median(dct[1:, 1:]))
+        bits = (dct > median).flatten()
+
+        value = 0
+        for bit in bits:
+            value = (value << 1) | int(bit)
+
+        return f"{value:016x}"
+    except Exception:
+        return None
+
+
+def _phash_distance(a: str | None, b: str | None) -> int | None:
+    if not a or not b:
+        return None
+    try:
+        return (int(a, 16) ^ int(b, 16)).bit_count()
+    except ValueError:
+        return None
+
+
+def _normalize_clip_title(title: str | None) -> str:
+    import re
+    return re.sub(r"[^a-z0-9]+", "", (title or "").lower())
+
+
+def load_clip_registry() -> dict:
+    """
+    Carga el registro persistente y migra automáticamente la lista antigua de IDs.
+    """
+    if not CLIP_REGISTRY_FILE.exists():
+        return {}
+
+    try:
+        with open(CLIP_REGISTRY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"  ⚠️  No se pudo leer el registro: {e}")
+        return {}
+
+    if isinstance(data, dict):
+        return data
+
+    if isinstance(data, list):
+        registry = {
+            str(clip_id): {
+                "status": "known",
+                "migrated_from_legacy": True,
+                "last_seen_at": time.time(),
+            }
+            for clip_id in data
+            if clip_id
+        }
+        save_clip_registry(registry)
+        print(f"  🔄 Registro antiguo migrado: {len(registry)} clips.")
+        return registry
+
+    print("  ⚠️  Formato de registro desconocido. Arranco con registro vacío.")
+    return {}
+
+
+def save_clip_registry(registry: dict):
+    """Guarda el registro de forma atómica y limita su crecimiento."""
+    CLIP_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    if len(registry) > REGISTRY_MAX_ENTRIES:
+        ordered = sorted(
+            registry.items(),
+            key=lambda item: float(item[1].get("last_seen_at", 0)),
+            reverse=True,
+        )
+        registry = dict(ordered[:REGISTRY_MAX_ENTRIES])
+
+    tmp_path = CLIP_REGISTRY_FILE.with_suffix(CLIP_REGISTRY_FILE.suffix + ".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(registry, f, indent=2, ensure_ascii=False)
+    tmp_path.replace(CLIP_REGISTRY_FILE)
+
+
+def update_clip_registry(registry: dict, clip_id: str, **fields):
+    record = registry.setdefault(str(clip_id), {})
+    record.update(fields)
+    record["last_seen_at"] = time.time()
+    save_clip_registry(registry)
+
+
+def _clip_is_retryable(record: dict) -> bool:
+    status = record.get("status")
+    if status not in {"discovered", "failed", "processing"}:
+        return False
+
+    last_attempt = float(record.get("last_attempt_at", 0))
+    return (time.time() - last_attempt) >= FAILED_RETRY_SECONDS
+
+
+def _get_clip_thumbnail_url(clip: dict) -> str | None:
+    """Usa thumbnail_url del listado y consulta el detalle solo si falta."""
+    thumbnail = clip.get("thumbnail_url")
+    if thumbnail:
+        return thumbnail
+
+    clip_id = clip.get("id")
+    if not clip_id:
+        return None
+
+    import requests
+
+    try:
+        r = requests.get(
+            f"https://kick.com/api/v2/clips/{clip_id}",
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Accept": "application/json",
+            },
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+        detail = data.get("clip") if isinstance(data, dict) else None
+        return detail.get("thumbnail_url") if isinstance(detail, dict) else None
+    except Exception:
+        return None
+
+
+def _find_duplicate_clip(clip: dict, fingerprint: str | None, registry: dict) -> str | None:
+    """Busca un clip reciente con la misma escena usando miniatura + metadata."""
+    clip_created = _parse_clip_timestamp(clip.get("created_at"))
+    if clip_created is None:
+        return None
+
+    try:
+        clip_duration = float(clip.get("duration")) if clip.get("duration") is not None else None
+    except (TypeError, ValueError):
+        clip_duration = None
+
+    clip_stream = _clip_stream_identity(clip)
+    clip_title = _normalize_clip_title(clip.get("title"))
+
+    candidates = []
+    for other_id, record in registry.items():
+        if other_id == str(clip.get("id")):
+            continue
+        if record.get("status") not in {"downloaded", "processing", "processed", "duplicate"}:
+            continue
+
+        other_created = record.get("created_timestamp")
+        if other_created is None:
+            continue
+
+        delta = abs(float(clip_created) - float(other_created))
+        if delta > DUPLICATE_WINDOW_SECONDS:
+            continue
+
+        other_stream = record.get("stream_identity")
+        if clip_stream and other_stream and clip_stream != other_stream:
+            continue
+
+        other_duration = record.get("duration")
+        if clip_duration is not None and other_duration is not None:
+            try:
+                if abs(clip_duration - float(other_duration)) > DUPLICATE_DURATION_TOLERANCE:
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+        distance = _phash_distance(fingerprint, record.get("fingerprint"))
+        if distance is not None and distance <= DUPLICATE_PHASH_DISTANCE:
+            candidates.append((distance, other_id))
+            continue
+
+        if (
+            not fingerprint
+            and clip_title
+            and clip_title == record.get("title_normalized")
+            and delta <= DUPLICATE_TITLE_WINDOW_SECONDS
+        ):
+            candidates.append((0, other_id))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: item[0])
+    return candidates[0][1]
+
+
+def fetch_kick_clips(channel: str = KICK_CHANNEL, limit: int = 50) -> list:
     """Obtiene los clips más recientes del canal."""
     import requests
+
     url = f"https://kick.com/api/v2/channels/{channel}/clips"
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -1517,6 +1782,7 @@ def fetch_kick_clips(channel: str = KICK_CHANNEL, limit: int = 20) -> list:
     }
     r = requests.get(url, headers=headers, timeout=20)
     r.raise_for_status()
+
     data = r.json()
     clips = data.get("clips") or data.get("data") or []
     return clips[:limit]
@@ -1534,14 +1800,13 @@ def download_kick_clip(clip: dict, dest_dir: Path) -> Path | None:
         print(f"  ❌ Clip sin video_url: {clip_id}")
         return None
 
-    # Nombre de archivo seguro
     safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in title)[:40].strip()
     created = (clip.get("created_at") or "")[:10]
     short_id = clip_id.replace("clip_", "")[-12:]
     out_name = f"{created} {safe_title} {short_id}.mp4".strip()
     out_path = dest_dir / out_name
 
-    if out_path.exists():
+    if out_path.exists() and out_path.stat().st_size >= MIN_VALID_OUTPUT_BYTES:
         print(f"  ⏭️  Ya existe: {out_name}")
         return out_path
 
@@ -1551,10 +1816,13 @@ def download_kick_clip(clip: dict, dest_dir: Path) -> Path | None:
         "-i", video_url,
         "-c", "copy",
         "-bsf:a", "aac_adtstoasc",
-        str(out_path)
+        str(out_path),
     ]
+
     try:
         subprocess.run(cmd, check=True, timeout=180)
+        if not out_path.exists() or out_path.stat().st_size < MIN_VALID_OUTPUT_BYTES:
+            raise RuntimeError("FFmpeg terminó pero el archivo descargado parece inválido.")
         print(f"  ✅ Descargado: {out_path.name}")
         return out_path
     except Exception as e:
@@ -1564,60 +1832,200 @@ def download_kick_clip(clip: dict, dest_dir: Path) -> Path | None:
         return None
 
 
+def _register_clip_metadata(clip: dict, registry: dict, **extra):
+    clip_id = str(clip.get("id"))
+    created_timestamp = _parse_clip_timestamp(clip.get("created_at"))
+
+    try:
+        duration = float(clip.get("duration")) if clip.get("duration") is not None else None
+    except (TypeError, ValueError):
+        duration = None
+
+    fields = {
+        "clip_id": clip_id,
+        "title": clip.get("title") or "",
+        "title_normalized": _normalize_clip_title(clip.get("title")),
+        "created_at": clip.get("created_at"),
+        "created_timestamp": created_timestamp,
+        "started_at": clip.get("started_at"),
+        "stream_identity": _clip_stream_identity(clip),
+        "duration": duration,
+    }
+    fields.update(extra)
+    update_clip_registry(registry, clip_id, **fields)
+
+
 def watch_kick_clips():
     """
-    Loop infinito:
-    - Cada KICK_POLL_SECONDS consulta la API de clips
-    - Si hay clip nuevo → descarga → cooldown 45s → procesa
+    Loop 24/7:
+    - Consulta Kick cada KICK_POLL_SECONDS.
+    - Detecta duplicados por miniatura + metadata antes de descargar el video.
+    - Marca 'downloaded' solo después de una descarga válida.
+    - Reintenta fallos temporales sin perder el clip.
     """
     print("=" * 60)
     print(f"  WATCHER Kick → /{KICK_CHANNEL}")
-    print(f"  Poll cada {KICK_POLL_SECONDS}s | Cooldown descarga {KICK_DOWNLOAD_COOLDOWN}s")
+    print(f"  Poll cada {KICK_POLL_SECONDS}s")
+    print(f"  Dedupe: {DUPLICATE_WINDOW_SECONDS}s / pHash <= {DUPLICATE_PHASH_DISTANCE}")
     print("=" * 60)
     print("  Ctrl+C para detener.\n")
 
-    seen = load_seen_clips()
-    print(f"  Clips ya conocidos: {len(seen)}")
+    registry = load_clip_registry()
+    print(f"  Registros conocidos: {len(registry)}")
 
-    # Primera pasada: marcar los actuales como vistos (no re-procesar histórico)
     try:
         current = fetch_kick_clips()
-        for c in current:
-            cid = c.get("id")
-            if cid:
-                seen.add(cid)
-        save_seen_clips(seen)
-        print(f"  Marcados {len(current)} clips actuales como ya vistos (solo procesará los NUEVOS).\n")
+        if not registry:
+            for clip in current:
+                cid = clip.get("id")
+                if cid:
+                    _register_clip_metadata(clip, registry, status="known")
+            save_clip_registry(registry)
+            print(
+                f"  🌱 Primera inicialización: {len(current)} clips actuales marcados como conocidos "
+                "(solo procesará los que aparezcan después).\n"
+            )
+        else:
+            print()
     except Exception as e:
-        print(f"  ⚠️  No se pudo hacer el seed inicial: {e}")
+        print(f"  ⚠️  No se pudo inicializar el registro: {e}\n")
 
     while True:
         try:
             clips = fetch_kick_clips()
-            new_ones = [c for c in clips if c.get("id") and c["id"] not in seen]
+            clips = sorted(
+                clips,
+                key=lambda c: _parse_clip_timestamp(c.get("created_at")) or 0,
+            )
 
-            if new_ones:
-                # Los más nuevos primero (API suele devolver recientes arriba)
-                for clip in new_ones:
-                    cid = clip["id"]
-                    print(f"\n🆕 Clip nuevo: {clip.get('title')} ({cid})")
-                    seen.add(cid)
-                    save_seen_clips(seen)
+            for clip in clips:
+                clip_id = clip.get("id")
+                if not clip_id:
+                    continue
 
-                    path = download_kick_clip(clip, CLIPS_DIR)
-                    print(f"  ⏳ Cooldown {KICK_DOWNLOAD_COOLDOWN}s (anti-duplicados)...")
-                    time.sleep(KICK_DOWNLOAD_COOLDOWN)
+                clip_id = str(clip_id)
+                record = registry.get(clip_id, {})
+                status = record.get("status")
 
-                    if path and path.exists():
-                        print(f"  🎬 Procesando automáticamente...")
+                if status in {"known", "processed", "duplicate"}:
+                    continue
+
+                if status == "downloaded":
+                    downloaded_path = Path(record.get("downloaded_path", ""))
+                    if not downloaded_path.exists():
+                        record["status"] = "discovered"
+                        save_clip_registry(registry)
+                    else:
+                        print(f"\n🎬 Reanudando procesamiento: {clip.get('title')} ({clip_id})")
+                        update_clip_registry(
+                            registry,
+                            clip_id,
+                            status="processing",
+                            last_attempt_at=time.time(),
+                        )
                         try:
-                            # Modo no-interactivo: Kimi facecam + trim completo por ahora
-                            # (cuando tengamos LLM-trim, acá se usa solo)
-                            process_one_clip(path, interactive=False)
+                            ok = process_one_clip(downloaded_path, interactive=False)
+                            if ok:
+                                update_clip_registry(
+                                    registry,
+                                    clip_id,
+                                    status="processed",
+                                    output_path=str(OUTPUT_DIR / f"reel_{downloaded_path.stem}.mp4"),
+                                )
+                            else:
+                                update_clip_registry(
+                                    registry,
+                                    clip_id,
+                                    status="failed",
+                                    last_error="process_one_clip devolvió False",
+                                )
                         except Exception as e:
-                            print(f"  ❌ Error procesando: {e}")
-            else:
-                print(f"  [{time.strftime('%H:%M:%S')}] Sin clips nuevos...", end="\r")
+                            update_clip_registry(
+                                registry,
+                                clip_id,
+                                status="failed",
+                                last_error=str(e),
+                            )
+                            print(f"  ❌ Error procesando {clip_id}: {e}")
+                        continue
+
+                if status in {"discovered", "failed", "processing"} and not _clip_is_retryable(record):
+                    continue
+
+                print(f"\n🆕 Clip nuevo: {clip.get('title')} ({clip_id})")
+
+                thumbnail_url = _get_clip_thumbnail_url(clip)
+                fingerprint = _compute_thumbnail_phash(thumbnail_url)
+
+                _register_clip_metadata(
+                    clip,
+                    registry,
+                    status="discovered",
+                    fingerprint=fingerprint,
+                    thumbnail_url=thumbnail_url,
+                    last_attempt_at=time.time(),
+                )
+
+                duplicate_of = _find_duplicate_clip(clip, fingerprint, registry)
+                if duplicate_of:
+                    print(f"  ♻️  Duplicado del clip {duplicate_of}. No se descarga.")
+                    update_clip_registry(
+                        registry,
+                        clip_id,
+                        status="duplicate",
+                        duplicate_of=duplicate_of,
+                    )
+                    continue
+
+                path = download_kick_clip(clip, CLIPS_DIR)
+                if path is None:
+                    update_clip_registry(
+                        registry,
+                        clip_id,
+                        status="failed",
+                        last_error="download_kick_clip falló",
+                    )
+                    continue
+
+                update_clip_registry(
+                    registry,
+                    clip_id,
+                    status="downloaded",
+                    downloaded_path=str(path),
+                )
+
+                print("  🎬 Procesando automáticamente...")
+                update_clip_registry(
+                    registry,
+                    clip_id,
+                    status="processing",
+                    last_attempt_at=time.time(),
+                )
+
+                try:
+                    ok = process_one_clip(path, interactive=False)
+                    if ok:
+                        update_clip_registry(
+                            registry,
+                            clip_id,
+                            status="processed",
+                            output_path=str(OUTPUT_DIR / f"reel_{path.stem}.mp4"),
+                        )
+                    else:
+                        update_clip_registry(
+                            registry,
+                            clip_id,
+                            status="failed",
+                            last_error="process_one_clip devolvió False",
+                        )
+                except Exception as e:
+                    update_clip_registry(
+                        registry,
+                        clip_id,
+                        status="failed",
+                        last_error=str(e),
+                    )
+                    print(f"  ❌ Error procesando {clip_id}: {e}")
 
             time.sleep(KICK_POLL_SECONDS)
 
