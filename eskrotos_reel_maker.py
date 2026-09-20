@@ -1950,7 +1950,6 @@ def _register_clip_metadata(clip: dict, registry: dict, **extra):
         duration = None
 
     fields = {
-        "clip_id": clip_id,
         "title": clip.get("title") or "",
         "title_normalized": _normalize_clip_title(clip.get("title")),
         "created_at": clip.get("created_at"),
