@@ -6,7 +6,7 @@ Convierte clips horizontales de Kick a Reels verticales 1080x1920
 con facecam arriba + divisor + gameplay centrado + subtítulos animados.
 
 Requisitos:
-    pip install opencv-python mediapipe faster-whisper numpy tqdm pillow
+    pip install opencv-python faster-whisper numpy pillow
 
 Uso:
     python eskrotos_reel_maker.py
@@ -1333,7 +1333,7 @@ def process_one_clip(video_path: Path, interactive: bool = True):
         print("  1 = Manual")
         print("  2 = LLM (Kimi x5 → DiffusionGemma)  ← recomendado")
         print("  S = Saltar este clip")
-        choice = input("  Elegí [1/2/3/S] (default 3): ").strip().lower() or "3"
+        choice = input("  Elegí [1/2/S] (default 2): ").strip().lower() or "2"
 
         if choice in ("s",):
             print("  ⏭️  Saltado.")
@@ -1418,7 +1418,7 @@ def process_one_clip(video_path: Path, interactive: bool = True):
         if suggested:
             print(f"\n  ⏱️  Omni sugiere: {start_sec:.1f}s → {end_sec:.1f}s ({end_sec-start_sec:.1f}s)")
             print("  Opciones:")
-            print("    Enter = usar sugerencia de Gemma")
+            print("    Enter = usar sugerencia de Omni")
             print("    M     = ajustar manualmente en el player")
             print("    T     = usar el clip completo")
             choice = input("  Elegí [Enter/M/T]: ").strip().lower()
@@ -1430,7 +1430,7 @@ def process_one_clip(video_path: Path, interactive: bool = True):
             else:
                 print(f"  → Usando Omni: {start_sec:.1f}s → {end_sec:.1f}s")
         else:
-            print("\n  ⏱️  Gemma no pudo sugerir trim. Opciones:")
+            print("\n  ⏱️  Omni no pudo sugerir trim. Opciones:")
             print("    M = elegir en el player")
             print("    T = clip completo (default)")
             choice = input("  Elegí [M/T]: ").strip().lower()
@@ -1657,7 +1657,9 @@ def save_clip_registry(registry: dict):
             key=lambda item: float(item[1].get("last_seen_at", 0)),
             reverse=True,
         )
-        registry = dict(ordered[:REGISTRY_MAX_ENTRIES])
+        keep = dict(ordered[:REGISTRY_MAX_ENTRIES])
+        registry.clear()
+        registry.update(keep)
 
     tmp_path = CLIP_REGISTRY_FILE.with_suffix(CLIP_REGISTRY_FILE.suffix + ".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
