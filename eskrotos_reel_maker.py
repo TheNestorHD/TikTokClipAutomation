@@ -1768,8 +1768,14 @@ def save_clip_registry(registry: dict):
 
 
 def update_clip_registry(registry: dict, clip_id: str, **fields):
+    # "clip_id" se guarda dentro del registro, pero no puede entrar dos veces
+    # como argumento y como **fields.
+    fields = dict(fields)
+    fields.pop("clip_id", None)
+
     record = registry.setdefault(str(clip_id), {})
     record.update(fields)
+    record["clip_id"] = str(clip_id)
     record["last_seen_at"] = time.time()
     save_clip_registry(registry)
 
