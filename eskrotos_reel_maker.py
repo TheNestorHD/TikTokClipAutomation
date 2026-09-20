@@ -19,13 +19,14 @@ import sys
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
-import cv2
+cv2 = None
+np = None
+
 import json
 import time
 import shutil
 import tempfile
 import subprocess
-import numpy as np
 from datetime import datetime
 from fractions import Fraction
 from pathlib import Path
@@ -106,19 +107,32 @@ MIN_VALID_OUTPUT_BYTES = 10 * 1024
 # ============================================================
 
 def check_dependencies():
+    global cv2, np
+
     missing = []
+
     try:
-        import cv2
+        import cv2 as _cv2
+        cv2 = _cv2
     except ImportError:
         missing.append("opencv-python")
+
+    try:
+        import numpy as _np
+        np = _np
+    except ImportError:
+        missing.append("numpy")
+
     try:
         from faster_whisper import WhisperModel
     except ImportError:
         missing.append("faster-whisper")
+
     try:
         from PIL import Image
     except ImportError:
         missing.append("pillow")
+
     try:
         import requests
     except ImportError:
