@@ -1169,6 +1169,70 @@ def transcribe_video(video_path: Path):
 
 
 # ============================================================
+# SUBTÍTULOS (ASS)
+# ============================================================
+
+def create_ass_file(words, ass_path: Path, video_w: int, video_h: int, text_y: int):
+    """
+    Genera subtítulos ASS palabra por palabra con posición fija.
+    """
+    header = f"""[Script Info]
+Title: Eskrotos Reel Subs
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
+PlayResX: {video_w}
+PlayResY: {video_h}
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,TF2 Build,{SUB_SIZE},{SUB_COLOR},&H000000FF,{SUB_BORDER},&H80000000,-1,0,0,0,100,100,0,0,1,{SUB_BORDER_WIDTH},0,8,0,0,0,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+
+    def sec_to_ass(t):
+        t = max(0.0, float(t))
+        h = int(t // 3600)
+        m = int((t % 3600) // 60)
+        sec = t % 60
+        return f"{h}:{m:02d}:{sec:05.2f}"
+
+    center_x = video_w // 2
+    pos = r"{\pos(" + str(center_x) + "," + str(text_y) + r")}"
+
+    events = []
+    i = 0
+    while i < len(words):
+        group = words[i:i + SUB_MAX_WORDS]
+        start = float(group[0]["start"])
+        end = float(group[-1]["end"])
+
+        if end - start < 0.08:
+            end = start + 0.08
+
+        if i + SUB_MAX_WORDS < len(words):
+            next_start = float(words[i + SUB_MAX_WORDS]["start"])
+            if end > next_start - 0.02:
+                end = max(start + 0.06, next_start - 0.02)
+
+        text = " ".join(w["word"] for w in group)
+        events.append(
+            f"Dialogue: 0,{sec_to_ass(start)},{sec_to_ass(end)},Default,,0,0,0,,"
+            f"{pos}{text}\n"
+        )
+        i += SUB_MAX_WORDS
+
+    with open(ass_path, "w", encoding="utf-8-sig") as f:
+        f.write(header)
+        f.writelines(events)
+
+    return ass_path
+
+
+# ============================================================
 # PROCESAMIENTO CON FFMPEG# ============================================================
 # PROCESAMIENTO CON FFMPEG
 # ============================================================
