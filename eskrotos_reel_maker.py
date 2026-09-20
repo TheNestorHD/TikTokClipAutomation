@@ -186,6 +186,27 @@ def extract_frame(video_path: Path, time_sec: float = 1.0) -> np.ndarray:
 # DETECCIÓN DE FACECAM
 # ============================================================
 
+def is_valid_facecam_box(x, y, w, h, orig_w, orig_h) -> bool:
+    """
+    Valida que la caja de facecam tenga un tamaño y proporción razonables
+    antes de usarla para construir el Reel.
+    """
+    if w < 120 or h < 120:
+        return False
+    if x < 0 or y < 0 or x + w > orig_w + 2 or y + h > orig_h + 2:
+        return False
+
+    aspect = w / max(h, 1)
+    if aspect < 0.55 or aspect > 2.2:
+        return False
+
+    area_ratio = (w * h) / max(orig_w * orig_h, 1)
+    if area_ratio < 0.01 or area_ratio > 0.45:
+        return False
+
+    return True
+
+
 def detect_facecam_llm(video_path: Path, orig_w: int, orig_h: int, time_sec: float = 2.0):
     """
     Localiza el panel de la facecam con visión.
