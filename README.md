@@ -18,7 +18,7 @@ Automatiza el flujo de creación:
 
 `python tiktok_clip_automation.py`
 
-La GUI permite guardar la configuración, arrancar/detener el pipeline y ver la cola de publicaciones.
+La GUI permite guardar la configuración, arrancar/detener el pipeline y ver la cola de publicaciones. El watcher corre en un hilo independiente de la cola de edición, por lo que el procesamiento de un clip no detiene la detección de nuevos clips.
 
 ## Watcher
 
