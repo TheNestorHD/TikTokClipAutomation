@@ -16,6 +16,7 @@ import subprocess
 import threading
 import queue
 import random
+import hashlib
 from datetime import datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
@@ -131,6 +132,8 @@ DUPLICATE_TITLE_WINDOW_SECONDS = env_int("DUPLICATE_TITLE_WINDOW_SECONDS", 30)
 DUPLICATE_THUMBNAIL_TIMEOUT = env_int("DUPLICATE_THUMBNAIL_TIMEOUT", 8)
 
 # --- Reintentos / idempotencia ---
+SAME_MOMENT_COOLDOWN_SECONDS = env_int("SAME_MOMENT_COOLDOWN_SECONDS", 45)
+PROCESS_QUEUE_COOLDOWN_SECONDS = env_int("PROCESS_QUEUE_COOLDOWN_SECONDS", 5)
 FAILED_RETRY_SECONDS = env_int("FAILED_RETRY_SECONDS", 120)
 REGISTRY_MAX_ENTRIES = env_int("REGISTRY_MAX_ENTRIES", 500)
 SKIP_EXISTING_OUTPUT = env_bool("SKIP_EXISTING_OUTPUT", True)
@@ -156,6 +159,10 @@ TIKTOK_UPLOAD_REGISTRY = resolve_path(
 )
 
 PIPELINE_ON_PROCESSED = None
+PIPELINE_JOB_QUEUE = None
+PIPELINE_PROCESSING_THREAD = None
+PIPELINE_REGISTRY = None
+PIPELINE_REGISTRY_LOCK = threading.RLock()
 
 # ============================================================
 # UTILIDADES
