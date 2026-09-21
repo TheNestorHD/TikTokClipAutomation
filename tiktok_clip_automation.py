@@ -2204,6 +2204,7 @@ class TikTokClipAutomationApp:
     ENV_FIELDS = {
         "Canal de Kick": "KICK_CHANNEL",
         "Intervalo watcher (s)": "KICK_POLL_SECONDS",
+        "Backoff API (s)": "KICK_ERROR_BACKOFF_SECONDS",
         "NVIDIA API Key": "NVIDIA_API_KEY",
         "Clips": "CLIPS_DIR",
         "Reels": "OUTPUT_DIR",
@@ -2216,6 +2217,7 @@ class TikTokClipAutomationApp:
         "Inicio TikTok": "TIKTOK_UPLOAD_START_HOUR",
         "Fin TikTok": "TIKTOK_UPLOAD_END_HOUR",
         "Máx. TikTok/día": "TIKTOK_MAX_PER_DAY",
+        "Variación TikTok (min)": "TIKTOK_VARIATION_MINUTES",
         "Caption": "TIKTOK_CAPTION_TEMPLATE",
     }
 
