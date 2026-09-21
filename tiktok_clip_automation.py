@@ -2303,8 +2303,8 @@ def watch_kick_clips(stop_event=None, on_processed=None):
         name="KickClipProcessor",
         daemon=True,
     )
-    worker_thread.start()
     PIPELINE_PROCESSING_THREAD = worker_thread
+    worker_thread.start()
 
     try:
         current = fetch_kick_clips()
