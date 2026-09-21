@@ -23,7 +23,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
-from playwright.sync_api import sync_playwright
+sync_playwright = None
 
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
@@ -191,6 +191,13 @@ def check_dependencies(exit_on_error: bool = False):
         import requests
     except ImportError:
         missing.append("requests")
+
+    global sync_playwright
+    try:
+        from playwright.sync_api import sync_playwright as _sync_playwright
+        sync_playwright = _sync_playwright
+    except ImportError:
+        missing.append("playwright")
 
     if missing:
         print("\n❌ Faltan dependencias:")
@@ -2439,6 +2446,11 @@ def manejar_dialogo_salida(page):
 
 
 def subir_video(ruta_video: Path, caption: str) -> bool:
+    global sync_playwright
+    if sync_playwright is None:
+        from playwright.sync_api import sync_playwright as _sync_playwright
+        sync_playwright = _sync_playwright
+
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Subiendo: {ruta_video.name}")
     print(f"Caption: {caption[:80]}{'...' if len(caption) > 80 else ''}")
 
@@ -2792,7 +2804,12 @@ class TikTokUploadManager:
             self.save_state(state)
 
             self.log(f"🚀 TikTok: subiendo {video_path.name}")
-            success = subir_video(video_path, item.get("caption", ""))
+            try:
+                success = subir_video(video_path, item.get("caption", ""))
+            except Exception as exc:
+                success = False
+                item["last_error"] = str(exc)
+                self.log(f"❌ TikTok: excepción durante la subida: {exc}")
 
             if success:
                 now = datetime.now()
@@ -2856,6 +2873,8 @@ class TikTokClipAutomationApp:
         "Whisper CLI": "WHISPER_CPP_EXE",
         "Whisper modelo": "WHISPER_CPP_MODEL",
         "Cookies TikTok": "TIKTOK_COOKIES_FILE",
+        "Auto-subida TikTok (true/false)": "TIKTOK_AUTO_UPLOAD",
+        "TikTok sin navegador visible (true/false)": "TIKTOK_HEADLESS",
         "Inicio TikTok": "TIKTOK_UPLOAD_START_HOUR",
         "Fin TikTok": "TIKTOK_UPLOAD_END_HOUR",
         "Máx. TikTok/día": "TIKTOK_MAX_PER_DAY",
@@ -2902,7 +2921,11 @@ class TikTokClipAutomationApp:
         header = ttk.Frame(main)
         header.pack(fill="x")
 
-        ttk.Label(header, text=self.TITLE, style="Title.TLabel").pack(side="left")
+        ttk.Label(
+            header,
+            text=f"{self.TITLE}  v{APP_VERSION}",
+            style="Title.TLabel",
+        ).pack(side="left")
         ttk.Label(
             header,
             textvariable=self.status_var,
