@@ -1422,6 +1422,14 @@ def process_one_clip(video_path: Path, interactive: bool = True):
 
     output_path = OUTPUT_DIR / f"reel_{video_path.stem}.mp4"
     if SKIP_EXISTING_OUTPUT and output_path.exists() and output_path.stat().st_size >= MIN_VALID_OUTPUT_BYTES:
+        # Validación extra: un mp4 con tamaño suficiente pero moov atom roto / video
+        # corrupto pasa el filtro de tamaño. Hacemos un probe barato para confirmarlo.
+        try:
+            get_video_info(video_path)
+        except Exception as probe_err:
+            print(f"  ⚠️  El clip existe pero ffprobe no lo pudo leer: {probe_err}")
+            print("  → Lo marco como descarga corrupta y aborto (no se saltea ni se mueve).")
+            raise RuntimeError(f"Clip inválido/corrupto: {video_path.name}")
         print(f"  ⏭️  El Reel ya existe: {output_path.name}")
         move_to_used(video_path)
         return True
@@ -1785,6 +1793,11 @@ def _clip_is_retryable(record: dict) -> bool:
     if status not in {"discovered", "failed", "processing"}:
         return False
 
+    # Los clips "discovered" (recién detectados o reseteados por archivo faltante)
+    # no tienen cooldown: el cooldown es solo para errores reales de proceso.
+    if status == "discovered":
+        return True
+
     last_attempt = float(record.get("last_attempt_at", 0))
     return (time.time() - last_attempt) >= FAILED_RETRY_SECONDS
 
@@ -1898,7 +1911,12 @@ def fetch_kick_clips(channel: str = KICK_CHANNEL, limit: int = 50) -> list:
 
 def download_kick_clip(clip: dict, dest_dir: Path) -> Path | None:
     """
-    Descarga un clip de Kick (m3u8 → mp4) con FFmpeg.
+    Descarga un clip de Kick (m3u8 → mp4).
+
+    1) Intenta con yt-dlp (maneja HLS correctamente y reintenta segmentos).
+    2) Fallback: FFmpeg con flags de reconexión para streams HLS
+       (-multiple_requests evita reuse de conexiones y 416s al reintentar).
+
     Nombre: fecha + título sanitizado + id corto.
     """
     clip_id = clip.get("id") or ""
@@ -1918,26 +1936,89 @@ def download_kick_clip(clip: dict, dest_dir: Path) -> Path | None:
         print(f"  ⏭️  Ya existe: {out_name}")
         return out_path
 
-    print(f"  ⬇️  Descargando: {title} ({clip.get('duration', '?')}s)")
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-i", video_url,
-        "-c", "copy",
-        "-bsf:a", "aac_adtstoasc",
-        str(out_path),
-    ]
+    def _is_valid() -> bool:
+        return out_path.exists() and out_path.stat().st_size >= MIN_VALID_OUTPUT_BYTES
 
-    try:
-        subprocess.run(cmd, check=True, timeout=180)
-        if not out_path.exists() or out_path.stat().st_size < MIN_VALID_OUTPUT_BYTES:
-            raise RuntimeError("FFmpeg terminó pero el archivo descargado parece inválido.")
-        print(f"  ✅ Descargado: {out_path.name}")
-        return out_path
-    except Exception as e:
-        print(f"  ❌ Error descargando: {e}")
-        if out_path.exists():
-            out_path.unlink(missing_ok=True)
-        return None
+    def _cleanup_partial():
+        if out_path.exists() and not _is_valid():
+            try:
+                out_path.unlink()
+            except Exception:
+                pass
+
+    max_attempts = 3
+
+    yt_dlp = shutil.which("yt-dlp")
+    if yt_dlp:
+        cmd = [
+            yt_dlp,
+            "--no-playlist",
+            "--no-part",          # escribe directo al .mp4 final
+            "--no-mtime",
+            "--retries", "3",
+            "--fragment-retries", "5",
+            "--restrict-filenames",
+            "-f", "best[ext=mp4]/best",
+            "-o", str(out_path),
+            video_url,
+        ]
+    else:
+        cmd = None
+
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            print(f"  🔁 Reintento de descarga ({attempt}/{max_attempts})...")
+            _cleanup_partial()
+
+        if cmd is not None:
+            print(f"  ⬇️  Descargando con yt-dlp: {title} ({clip.get('duration', '?')}s)")
+        else:
+            print(f"  ⬇️  Descargando con FFmpeg: {title} ({clip.get('duration', '?')}s)")
+            cmd = [
+                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+                "-multiple_requests", "1",
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5",
+                "-rw_timeout", "30000000",
+                "-i", video_url,
+                "-c", "copy",
+                "-bsf:a", "aac_adtstoasc",
+                str(out_path),
+            ]
+
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=300,
+            )
+            stderr = (result.stderr or "").strip()
+
+            if result.returncode != 0:
+                tail = "\n".join(stderr.splitlines()[-6:]) if stderr else "(sin salida de error)"
+                print(f"  ⚠️  Descarga falló (código {result.returncode}):\n  {tail}")
+                continue
+
+            if not _is_valid():
+                print("  ⚠️  La descarga terminó pero el archivo parece inválido/corrupto.")
+                continue
+
+            print(f"  ✅ Descargado: {out_path.name}")
+            return out_path
+
+        except subprocess.TimeoutExpired:
+            print("  ⚠️  Timeout de descarga (300s).")
+        except Exception as e:
+            print(f"  ⚠️  Error descargando: {e}")
+
+    _cleanup_partial()
+    print(f"  ❌ No se pudo descargar {clip_id} tras {max_attempts} intentos.")
+    return None
 
 
 def _register_clip_metadata(clip: dict, registry: dict, **extra):
@@ -1977,6 +2058,10 @@ def watch_kick_clips():
     print("=" * 60)
     print("  Ctrl+C para detener.\n")
 
+    # Heartbeat: cada cuántas pasadas mostrar "sigo vivo" aunque no haya novedades.
+    HEARTBEAT_POLLS = max(1, round(60 / max(KICK_POLL_SECONDS, 1)))
+    polls_since_heartbeat = 0
+
     registry = load_clip_registry()
     print(f"  Registros conocidos: {len(registry)}")
 
@@ -2014,47 +2099,65 @@ def watch_kick_clips():
                 record = registry.get(clip_id, {})
                 status = record.get("status")
 
+                # Si el mp4 ya no está en disco (lo borraste a mano, lo movió otro proceso,
+                # o la descarga anterior quedó truncada), olvidamos el estado y reactivamos
+                # el clip para volver a descargarlo en este mismo paso del loop.
+                downloaded_path_str = record.get("downloaded_path")
+                if (
+                    status in {"downloaded", "failed", "processing"}
+                    and downloaded_path_str
+                ):
+                    downloaded_path = Path(downloaded_path_str)
+                    if not downloaded_path.exists():
+                        print(f"  ♻️  El archivo de {clip_id} ya no existe en disco. "
+                              "Lo marco para re-descargar.")
+                        update_clip_registry(
+                            registry,
+                            clip_id,
+                            status="discovered",
+                            downloaded_path=None,
+                            last_error="archivo desapareció del disco",
+                        )
+                        status = "discovered"
+                        record = registry.get(clip_id, {})
+
                 if status in {"known", "processed", "duplicate"}:
                     continue
 
                 if status == "downloaded":
                     downloaded_path = Path(record.get("downloaded_path", ""))
-                    if not downloaded_path.exists():
-                        record["status"] = "discovered"
-                        save_clip_registry(registry)
-                    else:
-                        print(f"\n🎬 Reanudando procesamiento: {clip.get('title')} ({clip_id})")
-                        update_clip_registry(
-                            registry,
-                            clip_id,
-                            status="processing",
-                            last_attempt_at=time.time(),
-                        )
-                        try:
-                            ok = process_one_clip(downloaded_path, interactive=False)
-                            if ok:
-                                update_clip_registry(
-                                    registry,
-                                    clip_id,
-                                    status="processed",
-                                    output_path=str(OUTPUT_DIR / f"reel_{downloaded_path.stem}.mp4"),
-                                )
-                            else:
-                                update_clip_registry(
-                                    registry,
-                                    clip_id,
-                                    status="failed",
-                                    last_error="process_one_clip devolvió False",
-                                )
-                        except Exception as e:
+                    print(f"\n🎬 Reanudando procesamiento: {clip.get('title')} ({clip_id})")
+                    update_clip_registry(
+                        registry,
+                        clip_id,
+                        status="processing",
+                        last_attempt_at=time.time(),
+                    )
+                    try:
+                        ok = process_one_clip(downloaded_path, interactive=False)
+                        if ok:
+                            update_clip_registry(
+                                registry,
+                                clip_id,
+                                status="processed",
+                                output_path=str(OUTPUT_DIR / f"reel_{downloaded_path.stem}.mp4"),
+                            )
+                        else:
                             update_clip_registry(
                                 registry,
                                 clip_id,
                                 status="failed",
-                                last_error=str(e),
+                                last_error="process_one_clip devolvió False",
                             )
-                            print(f"  ❌ Error procesando {clip_id}: {e}")
-                        continue
+                    except Exception as e:
+                        update_clip_registry(
+                            registry,
+                            clip_id,
+                            status="failed",
+                            last_error=str(e),
+                        )
+                        print(f"  ❌ Error procesando {clip_id}: {e}")
+                    continue
 
                 if status in {"discovered", "failed", "processing"} and not _clip_is_retryable(record):
                     continue
@@ -2135,6 +2238,21 @@ def watch_kick_clips():
                     print(f"  ❌ Error procesando {clip_id}: {e}")
 
             time.sleep(KICK_POLL_SECONDS)
+
+            polls_since_heartbeat += 1
+            if polls_since_heartbeat >= HEARTBEAT_POLLS:
+                polls_since_heartbeat = 0
+                known = sum(1 for r in registry.values() if r.get("status") == "known")
+                pending = sum(
+                    1 for r in registry.values()
+                    if r.get("status") in {"discovered", "downloaded", "processing", "failed"}
+                )
+                ts = datetime.now().strftime("%H:%M:%S")
+                print(
+                    f"  [{ts}] ⏱️  Watcher vivo — {len(clips)} clips en la página, "
+                    f"{known} conocidos, {pending} pendientes.",
+                    flush=True,
+                )
 
         except KeyboardInterrupt:
             print("\n\n⏹️  Watcher detenido.")
