@@ -31,25 +31,6 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 cv2 = None
 np = None
 
-import os
-import sys
-
-# Windows: HuggingFace no puede crear symlinks sin Developer Mode → fuerza copia
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
-os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-
-cv2 = None
-np = None
-
-import json
-import time
-import shutil
-import tempfile
-import subprocess
-from datetime import datetime
-from fractions import Fraction
-from pathlib import Path
-
 # ============================================================
 # CONFIGURACIÓN
 # ============================================================
@@ -214,15 +195,18 @@ def check_dependencies(exit_on_error: bool = False):
         print("\n❌ Faltan dependencias:")
         for m in missing:
             print(f"   pip install {m}")
-        print("\nInstalá y volvé a correr el script.")
-        sys.exit(1)
+        if exit_on_error:
+            sys.exit(1)
+        return False
 
-    # FFmpeg
     if shutil.which("ffmpeg") is None:
         print("❌ No se encontró FFmpeg en el PATH.")
-        sys.exit(1)
+        if exit_on_error:
+            sys.exit(1)
+        return False
 
     print("✅ Dependencias OK")
+    return True
 
 
 def ensure_dirs(strict: bool = False):
@@ -1327,7 +1311,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 
 # ============================================================
-# PROCESAMIENTO CON FFMPEG# ============================================================
 # PROCESAMIENTO CON FFMPEG
 # ============================================================
 
@@ -1442,7 +1425,16 @@ def build_ffmpeg_cmd(
         cmd += ["-t", f"{trim_duration:.3f}"]
 
     cmd += ["-i", str(video_path)]
-    cmd += ["-i", str(DIVIDER_PATH)]
+
+    divider_input = DIVIDER_PATH
+    if not divider_input.exists():
+        divider_input = APP_DIR / "_fallback_divider.png"
+        if not divider_input.exists():
+            fallback = np.zeros((DIVIDER_H, TARGET_W, 3), dtype=np.uint8)
+            fallback[:] = (0, 180, 0)
+            cv2.imwrite(str(divider_input), fallback)
+
+    cmd += ["-i", str(divider_input)]
 
     cmd += [
         "-filter_complex", filter_complex,
@@ -1810,7 +1802,7 @@ def subir_video(ruta_video: Path, caption: str) -> bool:
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
-            headless=HEADLESS,
+            headless=TIKTOK_HEADLESS,
             args=["--disable-blink-features=AutomationControlled"]
         )
         context = browser.new_context(
@@ -1819,7 +1811,7 @@ def subir_video(ruta_video: Path, caption: str) -> bool:
         )
 
         try:
-            cargar_cookies(context, COOKIES)
+            cargar_cookies(context, TIKTOK_COOKIES_FILE)
             page = context.new_page()
 
             print("→ Navegando a TikTok Studio Upload...")
