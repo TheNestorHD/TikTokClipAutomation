@@ -4044,10 +4044,10 @@ class TikTokClipAutomationApp:
         )
         body = self.ctk.CTkFrame(tiktok_card, fg_color="transparent")
         body.pack(fill="both", expand=True, padx=(0, 18), pady=14)
-        self._label(body, "Publicación TikTok", size=15, bold=True).pack(anchor="w")
+        self._label(body, "TikTok: publicación o borradores", size=15, bold=True).pack(anchor="w")
         self._label(
             body,
-            "Publica automáticamente en cuanto termina cada Reel. No hay horarios, franjas ni límites artificiales.",
+            "Cada Reel terminado se sube automáticamente. El interruptor decide si se publica de inmediato o se guarda como borrador.",
             size=11,
             color=self.MUTED,
             wraplength=720,
@@ -4055,7 +4055,7 @@ class TikTokClipAutomationApp:
         ).pack(anchor="w", pady=(3, 10))
         self.auto_upload_switch = self.ctk.CTkSwitch(
             body,
-            text="Activar publicación automática",
+            text="Publicar automáticamente (desactivado = guardar en borradores)",
             variable=self.auto_upload_var,
             onvalue=True,
             offvalue=False,
@@ -4064,6 +4064,8 @@ class TikTokClipAutomationApp:
             button_hover_color=self.ACCENT_HOVER,
         )
         self.auto_upload_switch.pack(anchor="w", pady=(0, 6))
+
+        self._make_caption_settings_row(body)
 
         self.headless_switch = self.ctk.CTkSwitch(
             body,
@@ -4226,6 +4228,87 @@ class TikTokClipAutomationApp:
             wraplength=820,
             justify="left",
         ).pack(anchor="w", padx=12, pady=(0, 10))
+
+    def _make_caption_settings_row(self, parent):
+        card = self._frame(parent, fg_color=self.CARD_ALT, corner_radius=10)
+        card.pack(fill="x", pady=(6, 8))
+
+        self._label(card, "Descripción de TikTok", size=11, color=self.YELLOW, bold=True).pack(
+            anchor="w", padx=12, pady=(10, 4)
+        )
+
+        row = self.ctk.CTkFrame(card, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(0, 7))
+
+        self._label(row, "Modo:", size=10, color=self.MUTED, bold=True).pack(
+            side="left", padx=(0, 8)
+        )
+        self.caption_mode_var = tk.StringVar(value="Título + hashtags")
+        self.caption_mode_menu = self.ctk.CTkOptionMenu(
+            row,
+            values=["Título + hashtags", "IA · Omni"],
+            variable=self.caption_mode_var,
+            width=180,
+            height=34,
+            fg_color=self.CARD,
+            button_color=self.ACCENT,
+            button_hover_color=self.ACCENT_HOVER,
+            command=self._on_caption_mode_change,
+        )
+        self.caption_mode_menu.pack(side="left")
+
+        self._label(
+            row,
+            "IA · Omni usa el mismo proxy del recorte + el título de Kick.",
+            size=10,
+            color=self.MUTED,
+            wraplength=500,
+            justify="left",
+        ).pack(side="left", padx=12)
+
+        template_row = self.ctk.CTkFrame(card, fg_color="transparent")
+        template_row.pack(fill="x", padx=12, pady=3)
+
+        self._label(template_row, "Plantilla:", size=10, color=self.MUTED, width=82, anchor="w").pack(
+            side="left"
+        )
+        self._ensure_var("TIKTOK_CAPTION_TEMPLATE", "{title} {hashtags}")
+        template_entry = self.ctk.CTkEntry(
+            template_row,
+            textvariable=self.entry_vars["TIKTOK_CAPTION_TEMPLATE"],
+            height=34,
+            placeholder_text="{title} {hashtags}",
+        )
+        template_entry.pack(side="left", fill="x", expand=True)
+
+        hashtags_row = self.ctk.CTkFrame(card, fg_color="transparent")
+        hashtags_row.pack(fill="x", padx=12, pady=(3, 10))
+
+        self._label(hashtags_row, "Hashtags:", size=10, color=self.MUTED, width=82, anchor="w").pack(
+            side="left"
+        )
+        self._ensure_var("TIKTOK_HASHTAGS", "#tiktok #kick")
+        hashtags_entry = self.ctk.CTkEntry(
+            hashtags_row,
+            textvariable=self.entry_vars["TIKTOK_HASHTAGS"],
+            height=34,
+            placeholder_text="#tiktok #kick #eskrotos",
+        )
+        hashtags_entry.pack(side="left", fill="x", expand=True)
+
+        self._label(
+            card,
+            'Modo manual: "{title}" = título de Kick · "{hashtags}" = tus hashtags. '
+            "Modo IA: Omni genera el texto y los hashtags de forma autónoma.",
+            size=10,
+            color=self.MUTED,
+            wraplength=820,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(0, 10))
+
+    def _on_caption_mode_change(self, value):
+        self.caption_mode_var.set(value)
+
 
     def _make_performance_row(self, parent):
         row = self.ctk.CTkFrame(parent, fg_color="transparent")
@@ -4395,19 +4478,19 @@ class TikTokClipAutomationApp:
     def _build_tiktok(self, parent):
         intro = self._frame(parent, fg_color=self.CARD)
         intro.pack(fill="x", pady=(4, 10))
-        self._label(intro, "Publicación automática", size=17, bold=True).pack(
+        self._label(intro, "TikTok: publicación o borradores", size=17, bold=True).pack(
             anchor="w", padx=18, pady=(15, 2)
         )
         self._label(
             intro,
-            "Cuando termina un Reel, entra directamente a TikTok. No existen horarios ni esperas artificiales.",
+            "Cuando termina un Reel, entra directamente a TikTok. El modo activo publica; el modo desactivado guarda el Reel como borrador.",
             size=11,
             color=self.MUTED,
         ).pack(anchor="w", padx=18, pady=(0, 14))
 
         row = self.ctk.CTkFrame(intro, fg_color="transparent")
         row.pack(fill="x", padx=18, pady=(0, 14))
-        self._label(row, "Publicación:", size=11, color=self.MUTED, bold=True).pack(side="left")
+        self._label(row, "Destino:", size=11, color=self.MUTED, bold=True).pack(side="left")
         self.tiktok_status_big = self._label(row, "Desactivada", size=12, color=self.RED, bold=True)
         self.tiktok_status_big.pack(side="left", padx=7)
 
@@ -4479,7 +4562,9 @@ class TikTokClipAutomationApp:
             "TIKTOK_COOKIES_FILE",
             "TIKTOK_AUTO_UPLOAD",
             "TIKTOK_HEADLESS",
+            "TIKTOK_CAPTION_MODE",
             "TIKTOK_CAPTION_TEMPLATE",
+            "TIKTOK_HASHTAGS",
             "FACE_SERVER_ERROR_RETRIES",
             "SAME_MOMENT_COOLDOWN_SECONDS",
             "PROCESS_QUEUE_COOLDOWN_SECONDS",
@@ -4495,6 +4580,13 @@ class TikTokClipAutomationApp:
 
         self.auto_upload_var.set(env_bool("TIKTOK_AUTO_UPLOAD", True))
         self.headless_var.set(env_bool("TIKTOK_HEADLESS", True))
+
+        caption_mode = env_value("TIKTOK_CAPTION_MODE", "template").strip().lower()
+        self.caption_mode_var.set(
+            "IA · Omni"
+            if caption_mode == "omni"
+            else "Título + hashtags"
+        )
 
         priority = env_value("FFMPEG_PRIORITY", "idle").strip().lower()
         if priority == "normal":
@@ -4532,7 +4624,19 @@ class TikTokClipAutomationApp:
                 "TIKTOK_COOKIES_FILE": self.entry_vars.get("TIKTOK_COOKIES_FILE", tk.StringVar()).get().strip(),
                 "TIKTOK_AUTO_UPLOAD": "true" if self.auto_upload_var.get() else "false",
                 "TIKTOK_HEADLESS": "true" if self.headless_var.get() else "false",
-                "TIKTOK_CAPTION_TEMPLATE": self.entry_vars.get("TIKTOK_CAPTION_TEMPLATE", tk.StringVar(value="{title} #tiktok #kick")).get().strip(),
+                "TIKTOK_CAPTION_MODE": (
+                    "omni"
+                    if self.caption_mode_var.get() == "IA · Omni"
+                    else "template"
+                ),
+                "TIKTOK_CAPTION_TEMPLATE": self.entry_vars.get(
+                    "TIKTOK_CAPTION_TEMPLATE",
+                    tk.StringVar(value="{title} {hashtags}"),
+                ).get().strip(),
+                "TIKTOK_HASHTAGS": self.entry_vars.get(
+                    "TIKTOK_HASHTAGS",
+                    tk.StringVar(value="#tiktok #kick"),
+                ).get().strip(),
                 "FACE_SERVER_ERROR_RETRIES": self.entry_vars.get("FACE_SERVER_ERROR_RETRIES", tk.StringVar(value="0")).get().strip(),
                 "SAME_MOMENT_COOLDOWN_SECONDS": self.entry_vars.get("SAME_MOMENT_COOLDOWN_SECONDS", tk.StringVar(value="45")).get().strip(),
                 "PROCESS_QUEUE_COOLDOWN_SECONDS": self.entry_vars.get("PROCESS_QUEUE_COOLDOWN_SECONDS", tk.StringVar(value="5")).get().strip(),
@@ -4745,7 +4849,7 @@ class TikTokClipAutomationApp:
             self.tiktok_var.set(
                 "Activo · publicación inmediata"
                 if TIKTOK_AUTO_UPLOAD
-                else "Desactivado"
+                else "Activo · borradores"
             )
             self.start_button.configure(state="disabled")
             self.stop_button.configure(state="normal")
@@ -4837,7 +4941,7 @@ class TikTokClipAutomationApp:
             )
             return
 
-        if TIKTOK_AUTO_UPLOAD and self.tiktok_manager is None:
+        if self.tiktok_manager is None:
             self.tiktok_manager = TikTokUploadManager(log_callback=self.log)
             self.tiktok_manager.start()
 
@@ -4953,7 +5057,7 @@ class TikTokClipAutomationApp:
                     text_color=self.YELLOW if pq else self.GREEN,
                 )
                 self.system_rows["tiktok"].configure(
-                    text="Publicación inmediata" if TIKTOK_AUTO_UPLOAD else "Desactivado",
+                    text="Publicación inmediata" if TIKTOK_AUTO_UPLOAD else "Borradores automáticos",
                     text_color=self.GREEN if TIKTOK_AUTO_UPLOAD else self.MUTED,
                 )
             else:
@@ -4968,7 +5072,7 @@ class TikTokClipAutomationApp:
             )
 
             self.tiktok_status_big.configure(
-                text="Activa · inmediata" if TIKTOK_AUTO_UPLOAD else "Desactivada",
+                text="Activa · inmediata" if TIKTOK_AUTO_UPLOAD else "Activa · borradores",
                 text_color=self.GREEN if TIKTOK_AUTO_UPLOAD else self.RED,
             )
             self._refresh_tiktok_queue()
@@ -5048,7 +5152,7 @@ def reload_config_from_env():
     global TIKTOK_UPLOAD_RETRIES, TIKTOK_UPLOAD_RETRY_DELAY_SECONDS, TIKTOK_MINIMIZED
     global TIKTOK_PROCESSING_TIMEOUT_SECONDS, TIKTOK_CONFIRM_TIMEOUT_SECONDS
     global TIKTOK_UPLOAD_CHECK_SECONDS, FFMPEG_PRIORITY, FFMPEG_THREADS
-    global TIKTOK_CAPTION_TEMPLATE, TIKTOK_UPLOAD_REGISTRY
+    global TIKTOK_CAPTION_MODE, TIKTOK_CAPTION_TEMPLATE, TIKTOK_HASHTAGS, TIKTOK_UPLOAD_REGISTRY
 
     CLIPS_DIR = resolve_path(env_value("CLIPS_DIR", "data/clips"))
     OUTPUT_DIR = resolve_path(env_value("OUTPUT_DIR", "data/reels"))
@@ -5140,9 +5244,16 @@ def reload_config_from_env():
             max(1, (os.cpu_count() or 4) - 2),
         ),
     )
+    TIKTOK_CAPTION_MODE = env_value("TIKTOK_CAPTION_MODE", "template").strip().lower()
+    if TIKTOK_CAPTION_MODE not in {"template", "omni"}:
+        TIKTOK_CAPTION_MODE = "template"
     TIKTOK_CAPTION_TEMPLATE = env_value(
         "TIKTOK_CAPTION_TEMPLATE",
-        "{title} #tiktok #kick",
+        "{title} {hashtags}",
+    )
+    TIKTOK_HASHTAGS = env_value(
+        "TIKTOK_HASHTAGS",
+        "#tiktok #kick",
     )
     TIKTOK_UPLOAD_REGISTRY = resolve_path(
         env_value("TIKTOK_UPLOAD_REGISTRY", "data/tiktok_uploads.json")
