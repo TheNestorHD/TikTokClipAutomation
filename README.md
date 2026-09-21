@@ -10,7 +10,7 @@ Automatiza el flujo de creación:
 2. `pip install -r requirements.txt`
 3. `python -m playwright install chromium`
 4. Copiá `.env.example` como `.env`.
-5. Iniciá **TTCA.pyw** para abrir la aplicación sin consola.
+5. Iniciá **TTCA.pyw** para abrir la aplicación sin consola. Si Windows no tiene asociada la extensión `.pyw` a Python, usá **TTCA.vbs** (también es invisible).
 6. Completá la configuración desde la interfaz.
 
 La interfaz incluye accesos directos para obtener una API Key de NVIDIA desde NVIDIA Build, instalar la extensión de exportación de cookies y abrir TikTok Studio. NVIDIA publica su página oficial de gestión de API Keys en `build.nvidia.com/settings/api-keys`. La extensión recomendada en la interfaz es **Get cookies.txt LOCALLY**, que exporta cookies en formato Netscape localmente.
@@ -45,3 +45,16 @@ La interfaz permite activar/desactivar la publicación automática, seleccionar 
 ## Seguridad
 
 No subas `.env` ni las cookies de TikTok al repositorio. La API key de NVIDIA también queda fuera del código.
+
+
+### Divisor
+El archivo configurado en `DIVIDER_PATH` debe ser un PNG de exactamente **1080 × 160 píxeles**. Si el archivo no existe, TTCA no inserta un divisor de reemplazo: el gameplay ocupa automáticamente todo el espacio que habría quedado reservado para esos 160 píxeles.
+
+### Papelera de reciclaje
+En la configuración de destino de clips usados podés elegir la Papelera. Internamente TTCA usa `USED_DIR=__RECYCLE_BIN__` y `send2trash` para enviar el archivo al destino de reciclaje del sistema en lugar de crear otra carpeta.
+
+### Detección de cámara y VTuber
+La IA primero busca una **webcam/cámara real** del streamer. Solo cuando no encuentra una cámara válida intenta localizar un **avatar VTuber 2D o 3D**. También evita seleccionar chat, alertas, logos, donaciones u otros overlays como si fueran la cámara.
+
+### Lanzamiento sin consola
+`TTCA.pyw` está pensado para Windows y no debería mostrar una consola cuando está asociado a `pythonw.exe`. `TTCA.vbs` ofrece un segundo lanzador invisible cuando la asociación de `.pyw` no está configurada correctamente.
