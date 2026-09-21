@@ -4639,6 +4639,20 @@ class TikTokClipAutomationApp:
     # Config helpers
     # --------------------------------------------------------
 
+    def _config_path_value(self, key: str) -> str:
+        raw = self.entry_vars.get(key, tk.StringVar()).get().strip()
+        if not raw:
+            return DEFAULT_RELATIVE_PATHS.get(key, "")
+        if raw == RECYCLE_BIN_TOKEN:
+            return raw
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            return raw
+        try:
+            return str(candidate.resolve().relative_to(APP_DIR.resolve()))
+        except ValueError:
+            return str(candidate)
+
     def _refresh_config_vars(self):
         reload_config_from_env()
         keys = [
@@ -4718,14 +4732,14 @@ class TikTokClipAutomationApp:
                 "KICK_POLL_SECONDS": self.entry_vars.get("KICK_POLL_SECONDS", tk.StringVar(value="1")).get().strip(),
                 "KICK_ERROR_BACKOFF_SECONDS": self.entry_vars.get("KICK_ERROR_BACKOFF_SECONDS", tk.StringVar(value="5")).get().strip(),
                 "NVIDIA_API_KEY": self.entry_vars.get("NVIDIA_API_KEY", tk.StringVar()).get().strip(),
-                "CLIPS_DIR": self.entry_vars.get("CLIPS_DIR", tk.StringVar()).get().strip(),
-                "OUTPUT_DIR": self.entry_vars.get("OUTPUT_DIR", tk.StringVar()).get().strip(),
-                "USED_DIR": self.entry_vars.get("USED_DIR", tk.StringVar()).get().strip(),
-                "DIVIDER_PATH": self.entry_vars.get("DIVIDER_PATH", tk.StringVar()).get().strip(),
-                "FONT_PATH": self.entry_vars.get("FONT_PATH", tk.StringVar()).get().strip(),
-                "WHISPER_CPP_EXE": self.entry_vars.get("WHISPER_CPP_EXE", tk.StringVar()).get().strip(),
-                "WHISPER_CPP_MODEL": self.entry_vars.get("WHISPER_CPP_MODEL", tk.StringVar()).get().strip(),
-                "TIKTOK_COOKIES_FILE": self.entry_vars.get("TIKTOK_COOKIES_FILE", tk.StringVar()).get().strip(),
+                "CLIPS_DIR": self._config_path_value("CLIPS_DIR"),
+                "OUTPUT_DIR": self._config_path_value("OUTPUT_DIR"),
+                "USED_DIR": self._config_path_value("USED_DIR"),
+                "DIVIDER_PATH": self._config_path_value("DIVIDER_PATH"),
+                "FONT_PATH": self._config_path_value("FONT_PATH"),
+                "WHISPER_CPP_EXE": self._config_path_value("WHISPER_CPP_EXE"),
+                "WHISPER_CPP_MODEL": self._config_path_value("WHISPER_CPP_MODEL"),
+                "TIKTOK_COOKIES_FILE": self._config_path_value("TIKTOK_COOKIES_FILE"),
                 "TIKTOK_AUTO_UPLOAD": "true" if self.auto_upload_var.get() else "false",
                 "TIKTOK_HEADLESS": "true" if self.headless_var.get() else "false",
                 "TIKTOK_CAPTION_MODE": (
