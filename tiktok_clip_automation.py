@@ -88,6 +88,7 @@ FACE_FALLBACK_MODEL = env_value("FACE_FALLBACK_MODEL", "google/diffusiongemma-26
 FACE_KIMI_MODEL = env_value("FACE_KIMI_MODEL", "moonshotai/kimi-k3")
 FACE_KIMI_TIMEOUT = env_int("FACE_KIMI_TIMEOUT", 130)
 FACE_FALLBACK_TIMEOUT = env_int("FACE_FALLBACK_TIMEOUT", 60)
+FACE_SERVER_ERROR_RETRIES = max(0, env_int("FACE_SERVER_ERROR_RETRIES", 0))
 
 # --- Whisper ---
 WHISPER_MODEL = env_value("WHISPER_MODEL", "large-v3")
@@ -368,11 +369,35 @@ def detect_facecam_llm(video_path: Path, orig_w: int, orig_h: int, time_sec: flo
 
                 if r.status_code in (429, 503):
                     wait = min(30, 5 * attempt)
-                    print(f"     ⚠️  {name} HTTP {r.status_code}. Reintento en {wait}s...")
+                    detail = (r.text or "").strip().replace("\\n", " ")
+                    print(
+                        f"     ⚠️  {name} HTTP {r.status_code}. "
+                        f"Reintento en {wait}s... {detail[:300]}"
+                    )
                     time.sleep(wait)
                     continue
 
-                r.raise_for_status()
+                if 500 <= r.status_code <= 599:
+                    detail = (r.text or "").strip().replace("\\n", " ")
+                    print(
+                        f"     ⚠️  {name} HTTP {r.status_code} (error del servidor). "
+                        f"{detail[:500]}"
+                    )
+                    if attempt <= FACE_SERVER_ERROR_RETRIES:
+                        wait = min(20, 5 * attempt)
+                        print(f"     🔁 Reintento por error 5xx en {wait}s...")
+                        time.sleep(wait)
+                        continue
+                    break
+
+                if r.status_code >= 400:
+                    detail = (r.text or "").strip().replace("\\n", " ")
+                    print(
+                        f"     ⚠️  {name} HTTP {r.status_code}: "
+                        f"{detail[:500]}"
+                    )
+                    break
+
                 data = r.json()
                 msg = data["choices"][0]["message"]
                 response_text = (msg.get("content") or "") + "\n" + (
@@ -438,7 +463,11 @@ def detect_facecam_llm(video_path: Path, orig_w: int, orig_h: int, time_sec: flo
         if model_id == FACE_KIMI_MODEL:
             print("  ⚠️  Kimi falló 5 veces. Pasando a DiffusionGemma...")
 
-    print("  ❌ Todos los modelos de visión fallaron para facecam.")
+    print(
+        "  ❌ Todos los modelos de visión fallaron para facecam. "
+        "Si ambos devuelven HTTP 5xx, el problema está del lado del servicio NVIDIA "
+        "o de su endpoint de inferencia, no en la detección local."
+    )
     return None
 
 
@@ -2912,6 +2941,7 @@ class TikTokClipAutomationApp:
         "Intervalo watcher (s)": "KICK_POLL_SECONDS",
         "Backoff API (s)": "KICK_ERROR_BACKOFF_SECONDS",
         "NVIDIA API Key": "NVIDIA_API_KEY",
+        "Reintentos NVIDIA 5xx": "FACE_SERVER_ERROR_RETRIES",
         "Clips": "CLIPS_DIR",
         "Reels": "OUTPUT_DIR",
         "Usados": "USED_DIR",
@@ -3314,6 +3344,7 @@ def reload_config_from_env():
     global TARGET_W, TARGET_H, DIVIDER_H
     global SUB_SIZE, SUB_Y_OFFSET, SUB_MAX_WORDS, SUB_COLOR, SUB_BORDER, SUB_BORDER_WIDTH
     global FACE_MAX_RETRIES_KIMI, FACE_FALLBACK_MODEL, FACE_KIMI_MODEL, FACE_KIMI_TIMEOUT, FACE_FALLBACK_TIMEOUT
+    global FACE_SERVER_ERROR_RETRIES
     global WHISPER_MODEL, WHISPER_DEVICE, WHISPER_COMPUTE, WHISPER_BACKEND
     global WHISPER_CPP_EXE, WHISPER_CPP_MODEL, WHISPER_CPP_THREADS
     global NVIDIA_API_KEY, NVIDIA_API_URL, NVIDIA_TRIM_OMNI, NVIDIA_TRIM_OMNI_TIMEOUT
@@ -3349,6 +3380,7 @@ def reload_config_from_env():
     FACE_KIMI_MODEL = env_value("FACE_KIMI_MODEL", "moonshotai/kimi-k3")
     FACE_KIMI_TIMEOUT = env_int("FACE_KIMI_TIMEOUT", 130)
     FACE_FALLBACK_TIMEOUT = env_int("FACE_FALLBACK_TIMEOUT", 60)
+    FACE_SERVER_ERROR_RETRIES = max(0, env_int("FACE_SERVER_ERROR_RETRIES", 0))
 
     WHISPER_MODEL = env_value("WHISPER_MODEL", "large-v3")
     WHISPER_DEVICE = env_value("WHISPER_DEVICE", "auto")
