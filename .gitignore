@@ -17,3 +17,10 @@ data/tiktok_cookies.txt
 *.log
 
 error_*.png
+
+# Build Windows
+.venv-build/
+build/
+dist/
+playwright-browsers/
+data/ttca_startup_error.log
