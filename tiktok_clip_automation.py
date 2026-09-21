@@ -3074,6 +3074,8 @@ def _caption_for_clip(clip: dict) -> str:
         return title
 
 class TikTokUploadManager:
+    """Publica cada Reel inmediatamente, sin horarios ni límites artificiales."""
+
     def __init__(self, log_callback=None):
         self.log_callback = log_callback or (lambda msg: print(msg))
         self.stop_event = threading.Event()
@@ -3099,7 +3101,8 @@ class TikTokUploadManager:
         items = state.setdefault("items", {})
         key = str(video_path.resolve())
 
-        if key in items and items[key].get("status") in {"uploaded", "queued", "uploading"}:
+        existing = items.get(key)
+        if existing and existing.get("status") in {"uploaded", "queued", "uploading"}:
             return False
 
         title = (clip or {}).get("title") or video_path.stem
@@ -3111,9 +3114,10 @@ class TikTokUploadManager:
             "created_at": time.time(),
             "scheduled_at": None,
             "last_error": None,
+            "retry_count": 0,
         }
         self.save_state(state)
-        self.log(f"📤 TikTok: agregado a cola → {video_path.name}")
+        self.log(f"📤 TikTok: agregado → {video_path.name}")
         self.wake_event.set()
         return True
 
@@ -3123,81 +3127,21 @@ class TikTokUploadManager:
         for video_path in sorted(OUTPUT_DIR.glob("*.mp4")):
             self.enqueue(video_path, {"title": video_path.stem})
 
-    def _uploaded_today(self, items) -> int:
-        today = datetime.now().strftime("%Y-%m-%d")
-        return sum(
-            1 for item in items.values()
-            if item.get("status") == "uploaded"
-            and item.get("uploaded_date") == today
-        )
-
-    def _next_schedule(self, now=None, after_timestamp=None):
-        """
-        Calcula la próxima publicación respetando:
-        - ventana horaria
-        - límite diario (gestionado por el worker)
-        - intervalo mínimo entre publicaciones
-        - variación aleatoria
-        """
-        now = now or datetime.now()
-        interval = timedelta(minutes=max(0, TIKTOK_UPLOAD_INTERVAL_MINUTES))
-
-        earliest = now
-        if after_timestamp:
-            try:
-                previous = datetime.fromtimestamp(float(after_timestamp))
-                earliest = max(earliest, previous + interval)
-            except (TypeError, ValueError, OSError):
-                pass
-
-        def inside_window(value):
-            return (
-                TIKTOK_UPLOAD_START_HOUR <= value.hour < TIKTOK_UPLOAD_END_HOUR
-            )
-
-        if inside_window(earliest):
-            if after_timestamp and TIKTOK_VARIATION_MINUTES > 0:
-                offset = random.randint(
-                    0,
-                    TIKTOK_VARIATION_MINUTES,
-                )
-                target = earliest + timedelta(minutes=offset)
-                if target.hour < TIKTOK_UPLOAD_END_HOUR:
-                    return target
-                earliest = target
-
-            if inside_window(earliest):
-                return earliest
-
-        # Buscar la próxima apertura de ventana.
-        day = earliest.date()
-        if earliest.hour >= TIKTOK_UPLOAD_END_HOUR:
-            day += timedelta(days=1)
-
-        target = datetime.combine(
-            day,
-            datetime.min.time(),
-        ).replace(hour=TIKTOK_UPLOAD_START_HOUR, minute=0)
-
-        if TIKTOK_VARIATION_MINUTES > 0:
-            target += timedelta(
-                minutes=random.randint(
-                    0,
-                    TIKTOK_VARIATION_MINUTES,
-                )
-            )
-
-        # Si la ventana empieza en el pasado por alguna configuración extraña,
-        # garantizamos que el resultado sea realmente futuro.
-        if target <= now:
-            day = day + timedelta(days=1)
-            target = datetime.combine(
-                day,
-                datetime.min.time(),
-            ).replace(hour=TIKTOK_UPLOAD_START_HOUR, minute=0)
-
-        return target
-
+    def retry_failed(self):
+        state = self.load_state()
+        changed = 0
+        for item in state.setdefault("items", {}).values():
+            if item.get("status") == "failed" and Path(item.get("video_path", "")).exists():
+                item["status"] = "queued"
+                item["scheduled_at"] = None
+                item["last_error"] = None
+                item["retry_count"] = int(item.get("retry_count", 0)) + 1
+                changed += 1
+        if changed:
+            self.save_state(state)
+            self.wake_event.set()
+            self.log(f"🔁 TikTok: {changed} fallo(s) reencolado(s).")
+        return changed
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -3210,14 +3154,14 @@ class TikTokUploadManager:
             daemon=True,
         )
         self.thread.start()
-        self.log("✅ Cola de TikTok iniciada.")
+        self.log("✅ TikTok automático iniciado: publicación inmediata.")
 
     def stop(self):
         self.stop_event.set()
         self.wake_event.set()
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=3)
-        self.log("⏹️  Cola de TikTok detenida.")
+        self.log("⏹️  TikTok automático detenido.")
 
     def _worker(self):
         while not self.stop_event.is_set():
@@ -3229,7 +3173,7 @@ class TikTokUploadManager:
             items = state.setdefault("items", {})
             pending = [
                 item for item in items.values()
-                if item.get("status") in {"queued", "uploading", "failed"}
+                if item.get("status") == "queued"
                 and Path(item.get("video_path", "")).exists()
             ]
             pending.sort(key=lambda x: x.get("created_at", 0))
@@ -3239,84 +3183,14 @@ class TikTokUploadManager:
                 self.wake_event.clear()
                 continue
 
-            today_count = self._uploaded_today(items)
-            if today_count >= TIKTOK_MAX_PER_DAY:
-                target = self._next_schedule()
-                seconds = max(30, (target - datetime.now()).total_seconds())
-                self.log(
-                    f"📅 TikTok: límite diario alcanzado ({today_count}/{TIKTOK_MAX_PER_DAY}). "
-                    f"Próxima ventana: {target.strftime('%Y-%m-%d %H:%M')}"
-                )
-                self.stop_event.wait(min(seconds, 15 * 60))
-                continue
-
-            now = datetime.now()
-            inside_window = (
-                TIKTOK_UPLOAD_START_HOUR <= now.hour < TIKTOK_UPLOAD_END_HOUR
-            )
-
             item = pending[0]
-            scheduled = item.get("scheduled_at")
-            if scheduled:
-                try:
-                    target = datetime.fromtimestamp(float(scheduled))
-                except (TypeError, ValueError, OSError):
-                    target = None
-            else:
-                target = None
-
-            if target is None:
-                last_upload_timestamp = None
-                uploaded_items = [
-                    item for item in items.values()
-                    if item.get("status") == "uploaded"
-                    and (item.get("uploaded_timestamp") or item.get("uploaded_at"))
-                ]
-                if uploaded_items:
-                    def upload_timestamp(item):
-                        raw = item.get("uploaded_timestamp")
-                        if raw:
-                            try:
-                                return float(raw)
-                            except (TypeError, ValueError):
-                                pass
-                        raw = item.get("uploaded_at")
-                        if raw:
-                            try:
-                                return datetime.fromisoformat(
-                                    str(raw).replace("Z", "+00:00")
-                                ).timestamp()
-                            except (TypeError, ValueError, OSError):
-                                pass
-                        return 0.0
-
-                    uploaded_items.sort(
-                        key=upload_timestamp
-                    )
-                    last_upload_timestamp = upload_timestamp(uploaded_items[-1])
-
-                target = self._next_schedule(
-                    now,
-                    after_timestamp=last_upload_timestamp,
-                )
-                item["scheduled_at"] = target.timestamp()
-                item["status"] = "queued"
-                self.save_state(state)
-            delay = (target - datetime.now()).total_seconds()
-            if delay > 0:
-                self.log(
-                    f"⏰ TikTok: {Path(item['video_path']).name} programado para "
-                    f"{target.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
-                self.stop_event.wait(min(delay, 60))
-                continue
-
             video_path = Path(item["video_path"])
             item["status"] = "uploading"
             item["last_error"] = None
             self.save_state(state)
 
-            self.log(f"🚀 TikTok: subiendo {video_path.name}")
+            self.log(f"🚀 TikTok: subiendo → {video_path.name}")
+
             try:
                 success = subir_video(video_path, item.get("caption", ""))
             except Exception as exc:
@@ -3330,20 +3204,21 @@ class TikTokUploadManager:
                 item["uploaded_date"] = now.strftime("%Y-%m-%d")
                 item["uploaded_at"] = now.isoformat()
                 item["uploaded_timestamp"] = time.time()
+                item["last_error"] = None
                 item["scheduled_at"] = None
                 self.save_state(state)
                 self.log(f"✅ TikTok: publicado → {video_path.name}")
             else:
                 item["status"] = "failed"
-                item["last_error"] = "La publicación no pudo confirmarse."
                 item["scheduled_at"] = None
+                item["retry_count"] = int(item.get("retry_count", 0)) + 1
+                if not item.get("last_error"):
+                    item["last_error"] = "La publicación no pudo confirmarse."
                 self.save_state(state)
                 self.log(
                     f"❌ TikTok: falló {video_path.name}. "
-                    f"Se reintentará en la próxima pasada."
+                    "Queda en FALLIDO hasta reintentar desde la interfaz."
                 )
-                self.stop_event.wait(60)
-
 
 # ============================================================
 # GUI
