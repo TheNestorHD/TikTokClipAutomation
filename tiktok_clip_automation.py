@@ -2557,48 +2557,135 @@ def manejar_dialogo_salida(page):
     return False
 
 
+
 def subir_video(ruta_video: Path, caption: str) -> bool:
+    """Intenta publicar un Reel en TikTok Studio usando Playwright."""
+    for intento in range(1, TIKTOK_UPLOAD_RETRIES + 1):
+        if intento > 1:
+            print(
+                f"\n↻ Reintento {intento}/{TIKTOK_UPLOAD_RETRIES} "
+                f"en {TIKTOK_UPLOAD_RETRY_DELAY_SECONDS}s..."
+            )
+            time.sleep(TIKTOK_UPLOAD_RETRY_DELAY_SECONDS)
+
+        if _subir_video_intento(ruta_video, caption, intento):
+            return True
+
+    print(f"✗ Falló después de {TIKTOK_UPLOAD_RETRIES} intentos.")
+    return False
+
+
+def _subir_video_intento(
+    ruta_video: Path,
+    caption: str,
+    intento: int = 1,
+) -> bool:
     global sync_playwright
+
     if sync_playwright is None:
         from playwright.sync_api import sync_playwright as _sync_playwright
         sync_playwright = _sync_playwright
 
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Subiendo: {ruta_video.name}")
+    print(
+        f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+        f"Subiendo (intento {intento}): {ruta_video.name}"
+    )
     print(f"Caption: {caption[:80]}{'...' if len(caption) > 80 else ''}")
 
+    browser = None
     with sync_playwright() as p:
+        browser_args = ["--disable-blink-features=AutomationControlled"]
+
+        if not TIKTOK_HEADLESS and TIKTOK_MINIMIZED:
+            # Chromium suele ignorar --start-minimized en Playwright.
+            # Sacamos la ventana del área visible en modo no-headless.
+            browser_args.append("--window-position=-32000,-32000")
+
         browser = p.chromium.launch(
             headless=TIKTOK_HEADLESS,
-            args=["--disable-blink-features=AutomationControlled"]
+            args=browser_args,
         )
+
         context = browser.new_context(
             viewport={"width": 1280, "height": 900},
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/129.0.0.0 Safari/537.36"
+            ),
         )
 
         try:
+            if not TIKTOK_COOKIES_FILE.exists():
+                raise FileNotFoundError(
+                    f"No existe el archivo de cookies: {TIKTOK_COOKIES_FILE}"
+                )
+
+            if not ruta_video.exists():
+                raise FileNotFoundError(
+                    f"No existe el video: {ruta_video}"
+                )
+
             cargar_cookies(context, TIKTOK_COOKIES_FILE)
             page = context.new_page()
 
             print("→ Navegando a TikTok Studio Upload...")
-            page.goto("https://www.tiktok.com/tiktokstudio/upload?lang=en", timeout=60000)
+            page.goto(
+                "https://www.tiktok.com/tiktokstudio/upload?lang=en",
+                timeout=60000,
+            )
             page.wait_for_load_state("domcontentloaded")
             time.sleep(2)
 
             cerrar_popups(page)
 
-            # Subir archivo
             print("→ Subiendo archivo...")
             file_input = page.locator('input[type="file"]').first
             file_input.wait_for(state="attached", timeout=15000)
             file_input.set_input_files(str(ruta_video))
-            time.sleep(4)
+            time.sleep(2)
 
-            print("→ Esperando procesamiento...")
-            time.sleep(8)
+            print("→ Esperando a que el video se procese (Post habilitado)...")
+            procesado = False
+            deadline = time.time() + TIKTOK_PROCESSING_TIMEOUT_SECONDS
+
+            while time.time() < deadline:
+                try:
+                    btn = page.locator(
+                        'button[data-e2e="post_video_button"], '
+                        'button:has-text("Post")'
+                    ).first
+
+                    if btn.is_visible(timeout=800):
+                        disabled = (
+                            btn.get_attribute("disabled")
+                            or btn.get_attribute("aria-disabled")
+                        )
+                        clases = (btn.get_attribute("class") or "").lower()
+
+                        if (
+                            disabled not in ["true", "True", True]
+                            and "disabled" not in clases
+                        ):
+                            procesado = True
+                            break
+                except Exception:
+                    pass
+
+                time.sleep(2)
+
+            if not procesado:
+                print(
+                    f"✗ El video no terminó de procesarse en "
+                    f"{TIKTOK_PROCESSING_TIMEOUT_SECONDS}s"
+                )
+                page.screenshot(path="error_procesamiento.png")
+                return False
+
+            print("→ Video procesado, botón Post habilitado")
+            time.sleep(1.5)
             cerrar_popups(page)
 
-            # Descripción
             print("→ Escribiendo descripción...")
             desc = page.locator('div[contenteditable="true"]').first
             desc.wait_for(state="visible", timeout=20000)
@@ -2611,7 +2698,6 @@ def subir_video(ruta_video: Path, caption: str) -> bool:
             time.sleep(1.2)
             cerrar_popups(page)
 
-            # ========== CLICK EN POST ==========
             print("→ Buscando botón Publicar...")
 
             post_selectors = [
@@ -2628,12 +2714,21 @@ def subir_video(ruta_video: Path, caption: str) -> bool:
                 try:
                     btn = page.locator(sel).first
                     if btn.count() > 0 and btn.is_visible(timeout=2500):
-                        disabled = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
+                        disabled = (
+                            btn.get_attribute("disabled")
+                            or btn.get_attribute("aria-disabled")
+                        )
                         if disabled in ["true", "True", True]:
                             continue
+
                         btn.scroll_into_view_if_needed()
                         time.sleep(0.5)
-                        btn.click(timeout=5000)
+
+                        try:
+                            btn.click(timeout=5000)
+                        except Exception:
+                            btn.evaluate("el => el.click()")
+
                         print(f"  → Click correcto en: {sel}")
                         clicked = True
                         break
@@ -2645,73 +2740,125 @@ def subir_video(ruta_video: Path, caption: str) -> bool:
                 page.screenshot(path="error_no_post_button.png")
                 return False
 
-            # Esperar un poco y manejar posibles diálogos
-            time.sleep(3)
-            
-            # Si aparece el diálogo de "exit", cancelarlo
-            manejar_dialogo_salida(page)
-            
-            # Solo botones de confirmación seguros (NO "Post" genérico)
-            for texto in ["Post now", "Continue", "Publicar ahora", "Continuar"]:
-                try:
-                    btn = page.locator(f'button:has-text("{texto}")').first
-                    if btn.is_visible(timeout=2000):
-                        btn.click()
-                        print(f"  → Confirmación extra: {texto}")
-                        time.sleep(2)
-                except Exception:
-                    pass
+            print(
+                f"→ Esperando confirmación (hasta "
+                f"{TIKTOK_CONFIRM_TIMEOUT_SECONDS}s)..."
+            )
 
-            # Volver a chequear el diálogo de salida por si aparece después
-            manejar_dialogo_salida(page)
+            publicado = False
+            deadline = time.time() + TIKTOK_CONFIRM_TIMEOUT_SECONDS
 
-            print("→ Esperando confirmación final (más tiempo)...")
-            time.sleep(12)
+            while time.time() < deadline:
+                content = page.content().lower()
+                url = page.url.lower()
 
-            # Última chequeo del diálogo de salida
-            manejar_dialogo_salida(page)
+                exito = any([
+                    "your video is being uploaded" in content,
+                    "video published" in content,
+                    "uploaded successfully" in content,
+                    "publicado" in content,
+                    "se está subiendo" in content,
+                    "/tiktokstudio/content" in url,
+                    ("manage" in url and "content" in url),
+                    ("content" in url and "tiktokstudio" in url),
+                ])
 
-            # Detección de éxito
-            content = page.content().lower()
-            url = page.url.lower()
+                fallo = any([
+                    "something went wrong" in content,
+                    "try again" in content,
+                    "failed" in content and "upload" in content,
+                ])
 
-            exito = any([
-                "your video is being uploaded" in content,
-                "video published" in content,
-                "uploaded successfully" in content,
-                "publicado" in content,
-                "se está subiendo" in content,
-                "/tiktokstudio/content" in url,
-                "manage" in url and "content" in url,
-                "content" in url and "tiktokstudio" in url,
-            ])
+                if exito and not fallo:
+                    publicado = True
+                    break
 
-            fallo = any([
-                "something went wrong" in content,
-                "try again" in content,
-                "failed" in content and "upload" in content,
-                "are you sure you want to exit" in content,
-            ])
+                post_now = False
+                for sel in [
+                    'button:has-text("Post now")',
+                    'button:has-text("Publicar ahora")',
+                    (
+                        '//button[contains(translate(translate(., '
+                        '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
+                        '"abcdefghijklmnopqrstuvwxyz"), "POST NOW", '
+                        '"post now"), "post now")]'
+                    ),
+                ]:
+                    try:
+                        btn = page.locator(sel).first
+                        if btn.is_visible(timeout=600):
+                            try:
+                                btn.click(timeout=1500)
+                            except Exception:
+                                btn.evaluate("el => el.click()")
 
-            if exito and not fallo:
+                            print(
+                                f"  → Confirmado modal Post now "
+                                f"({sel[:30]})"
+                            )
+                            post_now = True
+                            break
+                    except Exception:
+                        pass
+
+                if post_now:
+                    time.sleep(2)
+                    continue
+
+                if manejar_dialogo_salida(page):
+                    print(
+                        "  → Diálogo de salida cancelado. "
+                        "Reintentando click en Post..."
+                    )
+                    time.sleep(1)
+
+                    for sel in post_selectors:
+                        try:
+                            btn = page.locator(sel).first
+                            if btn.count() > 0 and btn.is_visible(timeout=800):
+                                disabled = (
+                                    btn.get_attribute("disabled")
+                                    or btn.get_attribute("aria-disabled")
+                                )
+                                if disabled in ["true", "True", True]:
+                                    continue
+
+                                try:
+                                    btn.click(timeout=1500)
+                                except Exception:
+                                    btn.evaluate("el => el.click()")
+
+                                print(
+                                    f"  → Re-click en Post: {sel[:40]}"
+                                )
+                                break
+                        except Exception:
+                            continue
+
+                    time.sleep(2)
+                    continue
+
+                time.sleep(2)
+
+            if publicado:
                 print("✓ Subido correctamente")
                 return True
-            else:
-                print("✗ No se confirmó la publicación")
-                page.screenshot(path="error_post_fallido.png")
-                print("  (Se guardó captura: error_post_fallido.png)")
-                return False
+
+            print("✗ No se confirmó la publicación")
+            page.screenshot(path="error_post_fallido.png")
+            print("  (Se guardó captura: error_post_fallido.png)")
+            return False
 
         except Exception as e:
             print(f"✗ Error inesperado: {e}")
             try:
                 page.screenshot(path="error_excepcion.png")
-            except:
+            except Exception:
                 pass
             return False
         finally:
-            browser.close()
-
+            if browser is not None:
+                browser.close()
 
 
 # ============================================================
