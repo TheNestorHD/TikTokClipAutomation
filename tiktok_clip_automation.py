@@ -145,9 +145,9 @@ TIKTOK_COOKIES_FILE = resolve_path(
 )
 TIKTOK_HEADLESS = env_bool("TIKTOK_HEADLESS", True)
 TIKTOK_AUTO_UPLOAD = env_bool("TIKTOK_AUTO_UPLOAD", True)
-TIKTOK_UPLOAD_START_HOUR = env_int("TIKTOK_UPLOAD_START_HOUR", 11)
-TIKTOK_UPLOAD_END_HOUR = env_int("TIKTOK_UPLOAD_END_HOUR", 21)
-TIKTOK_MAX_PER_DAY = env_int("TIKTOK_MAX_PER_DAY", 10)
+TIKTOK_UPLOAD_START_HOUR = env_int("TIKTOK_UPLOAD_START_HOUR", 0)
+TIKTOK_UPLOAD_END_HOUR = env_int("TIKTOK_UPLOAD_END_HOUR", 23)
+TIKTOK_MAX_PER_DAY = env_int("TIKTOK_MAX_PER_DAY", 15)
 TIKTOK_VARIATION_MINUTES = env_int("TIKTOK_VARIATION_MINUTES", 5)
 TIKTOK_UPLOAD_INTERVAL_MINUTES = env_int("TIKTOK_UPLOAD_INTERVAL_MINUTES", 60)
 TIKTOK_UPLOAD_RETRIES = max(1, env_int("TIKTOK_UPLOAD_RETRIES", 3))
@@ -3239,13 +3239,30 @@ class TikTokUploadManager:
                 uploaded_items = [
                     item for item in items.values()
                     if item.get("status") == "uploaded"
-                    and item.get("uploaded_timestamp")
+                    and (item.get("uploaded_timestamp") or item.get("uploaded_at"))
                 ]
                 if uploaded_items:
+                    def upload_timestamp(item):
+                        raw = item.get("uploaded_timestamp")
+                        if raw:
+                            try:
+                                return float(raw)
+                            except (TypeError, ValueError):
+                                pass
+                        raw = item.get("uploaded_at")
+                        if raw:
+                            try:
+                                return datetime.fromisoformat(
+                                    str(raw).replace("Z", "+00:00")
+                                ).timestamp()
+                            except (TypeError, ValueError, OSError):
+                                pass
+                        return 0.0
+
                     uploaded_items.sort(
-                        key=lambda x: float(x.get("uploaded_timestamp", 0))
+                        key=upload_timestamp
                     )
-                    last_upload_timestamp = uploaded_items[-1].get("uploaded_timestamp")
+                    last_upload_timestamp = upload_timestamp(uploaded_items[-1])
 
                 target = self._next_schedule(
                     now,
