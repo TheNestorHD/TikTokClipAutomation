@@ -145,13 +145,8 @@ TIKTOK_COOKIES_FILE = resolve_path(
 )
 TIKTOK_HEADLESS = env_bool("TIKTOK_HEADLESS", True)
 TIKTOK_AUTO_UPLOAD = env_bool("TIKTOK_AUTO_UPLOAD", True)
-TIKTOK_UPLOAD_START_HOUR = env_int("TIKTOK_UPLOAD_START_HOUR", 0)
-TIKTOK_UPLOAD_END_HOUR = env_int("TIKTOK_UPLOAD_END_HOUR", 23)
-TIKTOK_MAX_PER_DAY = env_int("TIKTOK_MAX_PER_DAY", 15)
-TIKTOK_VARIATION_MINUTES = env_int("TIKTOK_VARIATION_MINUTES", 5)
-TIKTOK_UPLOAD_INTERVAL_MINUTES = env_int("TIKTOK_UPLOAD_INTERVAL_MINUTES", 60)
 TIKTOK_UPLOAD_RETRIES = max(1, env_int("TIKTOK_UPLOAD_RETRIES", 3))
-TIKTOK_UPLOAD_RETRY_DELAY_SECONDS = max(5, env_int("TIKTOK_UPLOAD_RETRY_DELAY_SECONDS", 60))
+TIKTOK_UPLOAD_RETRY_DELAY_SECONDS = max(0, env_int("TIKTOK_UPLOAD_RETRY_DELAY_SECONDS", 0))
 TIKTOK_MINIMIZED = env_bool("TIKTOK_MINIMIZED", True)
 TIKTOK_PROCESSING_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_PROCESSING_TIMEOUT_SECONDS", 180))
 TIKTOK_CONFIRM_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_CONFIRM_TIMEOUT_SECONDS", 90))
@@ -4724,11 +4719,9 @@ def reload_config_from_env():
     global SAME_MOMENT_COOLDOWN_SECONDS, PROCESS_QUEUE_COOLDOWN_SECONDS
     global FAILED_RETRY_SECONDS, REGISTRY_MAX_ENTRIES, SKIP_EXISTING_OUTPUT, MIN_VALID_OUTPUT_BYTES
     global TIKTOK_COOKIES_FILE, TIKTOK_HEADLESS, TIKTOK_AUTO_UPLOAD
-    global TIKTOK_UPLOAD_START_HOUR, TIKTOK_UPLOAD_END_HOUR, TIKTOK_MAX_PER_DAY
-    global TIKTOK_VARIATION_MINUTES, TIKTOK_UPLOAD_INTERVAL_MINUTES
     global TIKTOK_UPLOAD_RETRIES, TIKTOK_UPLOAD_RETRY_DELAY_SECONDS, TIKTOK_MINIMIZED
     global TIKTOK_PROCESSING_TIMEOUT_SECONDS, TIKTOK_CONFIRM_TIMEOUT_SECONDS
-    global TIKTOK_UPLOAD_CHECK_SECONDS
+    global TIKTOK_UPLOAD_CHECK_SECONDS, FFMPEG_PRIORITY, FFMPEG_THREADS
     global TIKTOK_CAPTION_TEMPLATE, TIKTOK_UPLOAD_REGISTRY
 
     CLIPS_DIR = resolve_path(env_value("CLIPS_DIR", "data/clips"))
@@ -4804,17 +4797,22 @@ def reload_config_from_env():
     )
     TIKTOK_HEADLESS = env_bool("TIKTOK_HEADLESS", True)
     TIKTOK_AUTO_UPLOAD = env_bool("TIKTOK_AUTO_UPLOAD", True)
-    TIKTOK_UPLOAD_START_HOUR = env_int("TIKTOK_UPLOAD_START_HOUR", 11)
-    TIKTOK_UPLOAD_END_HOUR = env_int("TIKTOK_UPLOAD_END_HOUR", 21)
-    TIKTOK_MAX_PER_DAY = env_int("TIKTOK_MAX_PER_DAY", 10)
-    TIKTOK_VARIATION_MINUTES = env_int("TIKTOK_VARIATION_MINUTES", 5)
-    TIKTOK_UPLOAD_INTERVAL_MINUTES = max(0, env_int("TIKTOK_UPLOAD_INTERVAL_MINUTES", 60))
     TIKTOK_UPLOAD_RETRIES = max(1, env_int("TIKTOK_UPLOAD_RETRIES", 3))
-    TIKTOK_UPLOAD_RETRY_DELAY_SECONDS = max(5, env_int("TIKTOK_UPLOAD_RETRY_DELAY_SECONDS", 60))
+    TIKTOK_UPLOAD_RETRY_DELAY_SECONDS = max(0, env_int("TIKTOK_UPLOAD_RETRY_DELAY_SECONDS", 0))
     TIKTOK_MINIMIZED = env_bool("TIKTOK_MINIMIZED", True)
     TIKTOK_PROCESSING_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_PROCESSING_TIMEOUT_SECONDS", 180))
     TIKTOK_CONFIRM_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_CONFIRM_TIMEOUT_SECONDS", 90))
     TIKTOK_UPLOAD_CHECK_SECONDS = max(5, env_int("TIKTOK_UPLOAD_CHECK_SECONDS", 30))
+    FFMPEG_PRIORITY = env_value("FFMPEG_PRIORITY", "idle").strip().lower()
+    if FFMPEG_PRIORITY not in {"normal", "below_normal", "idle"}:
+        FFMPEG_PRIORITY = "idle"
+    FFMPEG_THREADS = max(
+        1,
+        env_int(
+            "FFMPEG_THREADS",
+            max(1, (os.cpu_count() or 4) - 2),
+        ),
+    )
     TIKTOK_CAPTION_TEMPLATE = env_value(
         "TIKTOK_CAPTION_TEMPLATE",
         "{title} #tiktok #kick",
@@ -4835,10 +4833,24 @@ def validate_runtime_config():
     return problems
 
 
+def _prepare_gui_stdio():
+    """Evita cualquier ventana de consola cuando TTCA se ejecuta con pythonw/.pyw."""
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+
 def main():
+    _prepare_gui_stdio()
     reload_config_from_env()
     ensure_dirs()
-    root = tk.Tk()
+
+    import customtkinter as ctk
+    ctk.set_appearance_mode("dark")
+    ctk.set_default_color_theme("dark-blue")
+
+    root = ctk.CTk()
     app = TikTokClipAutomationApp(root)
     problems = validate_runtime_config()
     if problems:
