@@ -11,13 +11,20 @@ ARCHIVO_JSON = CARPETA_VIDEOS / "videos.json"
 ARCHIVO_SUBIDOS = CARPETA_VIDEOS / "subidos.json"
 COOKIES = Path(r"G:\Tiktok\cookies.txt")
 
-HORA_INICIO = 11
-HORA_FIN = 21
-MAX_POR_DIA = 10
+HORA_INICIO = 00
+HORA_FIN = 23
+MAX_POR_DIA = 15
 VARIACION_MINUTOS = 5
+
+# Minutos de espera entre subidas. None = reparte en horarios a lo largo del
+# día (comportamiento original con VARIACION_MINUTOS).
+INTERVALO_MINUTOS = 60
 
 # True = navegador invisible | False = visible (más confiable)
 HEADLESS = True
+
+# True = abrir el navegador minimizado (solo aplica en modo visible)
+MINIMIZADO = True
 # ===========================================================
 
 
@@ -161,13 +168,36 @@ def manejar_dialogo_salida(page):
 
 
 def subir_video(ruta_video: Path, caption: str) -> bool:
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Subiendo: {ruta_video.name}")
+    intento = 1
+    return _subir_video_intento(ruta_video, caption, intento)
+
+
+def subir_video_con_reintento(ruta_video: Path, caption: str, max_intentos: int = 3) -> bool:
+    """Reintenta la subida cada 60 segundos si falla."""
+    for intento in range(1, max_intentos + 1):
+        if intento > 1:
+            print(f"\n↻ Reintento {intento}/{max_intentos} en 60 segundos...")
+            time.sleep(60)
+        if _subir_video_intento(ruta_video, caption, intento):
+            return True
+    print(f"✗ Falló después de {max_intentos} intentos.")
+    return False
+
+
+def _subir_video_intento(ruta_video: Path, caption: str, intento: int = 1) -> bool:
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Subiendo (intento {intento}): {ruta_video.name}")
     print(f"Caption: {caption[:80]}{'...' if len(caption) > 80 else ''}")
 
     with sync_playwright() as p:
+        browser_args = ["--disable-blink-features=AutomationControlled"]
+        if not HEADLESS and MINIMIZADO:
+            # --start-minimized lo ignora Chromium en modo automatizado.
+            # Truco que sí funciona: mover la ventana fuera de la pantalla.
+            browser_args.append("--window-position=-32000,-32000")
+
         browser = p.chromium.launch(
             headless=HEADLESS,
-            args=["--disable-blink-features=AutomationControlled"]
+            args=browser_args
         )
         context = browser.new_context(
             viewport={"width": 1280, "height": 900},
@@ -190,10 +220,35 @@ def subir_video(ruta_video: Path, caption: str) -> bool:
             file_input = page.locator('input[type="file"]').first
             file_input.wait_for(state="attached", timeout=15000)
             file_input.set_input_files(str(ruta_video))
-            time.sleep(4)
+            time.sleep(2)
 
-            print("→ Esperando procesamiento...")
-            time.sleep(8)
+            # ---- Esperar a que el video se procese de verdad ----
+            print("→ Esperando a que el video se procese (Post habilitado)...")
+            procesado = False
+            deadline = time.time() + 180  # 3 min máximo
+            while time.time() < deadline:
+                try:
+                    btn = page.locator(
+                        'button[data-e2e="post_video_button"], '
+                        'button:has-text("Post")'
+                    ).first
+                    if btn.is_visible(timeout=800):
+                        disabled = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
+                        clases = (btn.get_attribute("class") or "").lower()
+                        if disabled not in ["true", "True", True] and "disabled" not in clases:
+                            procesado = True
+                            break
+                except Exception:
+                    pass
+                time.sleep(2)
+
+            if not procesado:
+                print("✗ El video no terminó de procesarse en 3 minutos")
+                page.screenshot(path="error_procesamiento.png")
+                return False
+
+            print("→ Video procesado, botón Post habilitado")
+            time.sleep(1.5)
             cerrar_popups(page)
 
             # Descripción
@@ -243,55 +298,76 @@ def subir_video(ruta_video: Path, caption: str) -> bool:
                 page.screenshot(path="error_no_post_button.png")
                 return False
 
-            # Esperar un poco y manejar posibles diálogos
-            time.sleep(3)
-            
-            # Si aparece el diálogo de "exit", cancelarlo
-            manejar_dialogo_salida(page)
-            
-            # Solo botones de confirmación seguros (NO "Post" genérico)
-            for texto in ["Post now", "Continue", "Publicar ahora", "Continuar"]:
-                try:
-                    btn = page.locator(f'button:has-text("{texto}")').first
-                    if btn.is_visible(timeout=2000):
-                        btn.click()
-                        print(f"  → Confirmación extra: {texto}")
-                        time.sleep(2)
-                except Exception:
-                    pass
+            # ---- Confirmar publicación con señales reales ----
+            print("→ Esperando confirmación (hasta 90s)...")
+            publicado = False
+            deadline = time.time() + 90
+            while time.time() < deadline:
+                content = page.content().lower()
+                url = page.url.lower()
 
-            # Volver a chequear el diálogo de salida por si aparece después
-            manejar_dialogo_salida(page)
+                exito = any([
+                    "your video is being uploaded" in content,
+                    "video published" in content,
+                    "uploaded successfully" in content,
+                    "publicado" in content,
+                    "se está subiendo" in content,
+                    "/tiktokstudio/content" in url,
+                    ("manage" in url and "content" in url),
+                    ("content" in url and "tiktokstudio" in url),
+                ])
+                if exito:
+                    publicado = True
+                    break
 
-            print("→ Esperando confirmación final (más tiempo)...")
-            time.sleep(12)
+                # 1) Modal "Continue to post?" → click en "Post now" (con fallback JS)
+                post_now = False
+                for sel in [
+                    'button:has-text("Post now")',
+                    'button:has-text("Publicar ahora")',
+                    '//button[contains(translate(translate(., "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"), "POST NOW", "post now"), "post now")]',
+                ]:
+                    try:
+                        btn = page.locator(sel).first
+                        if btn.is_visible(timeout=600):
+                            try:
+                                btn.click(timeout=1500)
+                            except Exception:
+                                btn.evaluate("el => el.click()")
+                            print(f'  → Confirmado modal Post now ({sel[:30]})')
+                            post_now = True
+                            break
+                    except Exception:
+                        pass
+                if post_now:
+                    time.sleep(2)
+                    continue
 
-            # Última chequeo del diálogo de salida
-            manejar_dialogo_salida(page)
+                # 2) Diálogo de salida → cancelar y reintentar el click en Post
+                if manejar_dialogo_salida(page):
+                    print("  → Diálogo de salida cancelado. Reintentando click en Post...")
+                    time.sleep(2)
+                    for sel in post_selectors:
+                        try:
+                            btn = page.locator(sel).first
+                            if btn.count() > 0 and btn.is_visible(timeout=800):
+                                disabled = btn.get_attribute("disabled") or btn.get_attribute("aria-disabled")
+                                if disabled in ["true", "True", True]:
+                                    continue
+                                try:
+                                    btn.click(timeout=1500)
+                                except Exception:
+                                    btn.evaluate("el => el.click()")
+                                print(f"  → Re-click en Post: {sel[:40]}")
+                                break
+                        except Exception:
+                            continue
+                    time.sleep(2)
+                    continue
 
-            # Detección de éxito
-            content = page.content().lower()
-            url = page.url.lower()
+                time.sleep(2)
 
-            exito = any([
-                "your video is being uploaded" in content,
-                "video published" in content,
-                "uploaded successfully" in content,
-                "publicado" in content,
-                "se está subiendo" in content,
-                "/tiktokstudio/content" in url,
-                "manage" in url and "content" in url,
-                "content" in url and "tiktokstudio" in url,
-            ])
-
-            fallo = any([
-                "something went wrong" in content,
-                "try again" in content,
-                "failed" in content and "upload" in content,
-                "are you sure you want to exit" in content,
-            ])
-
-            if exito and not fallo:
+            if publicado:
                 print("✓ Subido correctamente")
                 return True
             else:
@@ -336,7 +412,7 @@ def main():
             if pendientes:
                 nombre, caption, ruta = pendientes[0]
                 print("\nSubiendo un video fuera de horario...")
-                exito = subir_video(ruta, caption)
+                exito = subir_video_con_reintento(ruta, caption)
                 if exito:
                     subidos[nombre] = {
                         "fecha": ahora.strftime("%Y-%m-%d"),
@@ -380,7 +456,7 @@ def main():
             continue
 
         nombre, caption, ruta = pendientes[0]
-        exito = subir_video(ruta, caption)
+        exito = subir_video_con_reintento(ruta, caption)
 
         if exito:
             subidos[nombre] = {
@@ -393,9 +469,14 @@ def main():
         else:
             print("No se registró como subido. Se reintentará más tarde.")
 
-        proximo = proximo_horario()
-        segundos = max(60, (proximo - datetime.now()).total_seconds())
-        print(f"\nPróxima subida estimada: {proximo.strftime('%H:%M:%S')} (en {int(segundos/60)} min)")
+        if INTERVALO_MINUTOS is None:
+            proximo = proximo_horario()
+            segundos = max(60, (proximo - datetime.now()).total_seconds())
+            print(f"\nPróxima subida estimada: {proximo.strftime('%H:%M:%S')} (en {int(segundos/60)} min)")
+        else:
+            jitter = random.randint(-VARIACION_MINUTOS, VARIACION_MINUTOS)
+            segundos = max(60, (INTERVALO_MINUTOS + jitter) * 60)
+            print(f"\nPróxima subida en {int(segundos/60)} min (intervalo {INTERVALO_MINUTOS} min ± jitter)")
         time.sleep(segundos)
 
 
