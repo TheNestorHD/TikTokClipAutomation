@@ -7,3 +7,4 @@ python-dotenv
 playwright
 yt-dlp
 customtkinter
+send2trash
