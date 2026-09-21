@@ -2946,35 +2946,73 @@ class TikTokUploadManager:
             and item.get("uploaded_date") == today
         )
 
-    def _next_schedule(self, now=None):
+    def _next_schedule(self, now=None, after_timestamp=None):
+        """
+        Calcula la próxima publicación respetando:
+        - ventana horaria
+        - límite diario (gestionado por el worker)
+        - intervalo mínimo entre publicaciones
+        - variación aleatoria
+        """
         now = now or datetime.now()
-        today = now.date()
+        interval = timedelta(minutes=max(0, TIKTOK_UPLOAD_INTERVAL_MINUTES))
 
-        candidates = []
-        for hour in range(TIKTOK_UPLOAD_START_HOUR, TIKTOK_UPLOAD_END_HOUR):
-            base = datetime.combine(today, datetime.min.time()).replace(
-                hour=hour, minute=0
+        earliest = now
+        if after_timestamp:
+            try:
+                previous = datetime.fromtimestamp(float(after_timestamp))
+                earliest = max(earliest, previous + interval)
+            except (TypeError, ValueError, OSError):
+                pass
+
+        def inside_window(value):
+            return (
+                TIKTOK_UPLOAD_START_HOUR <= value.hour < TIKTOK_UPLOAD_END_HOUR
             )
-            offset = random.randint(
-                -TIKTOK_VARIATION_MINUTES,
-                TIKTOK_VARIATION_MINUTES
-            )
-            candidates.append(base + timedelta(minutes=offset))
 
-        for candidate in sorted(candidates):
-            if candidate > now:
-                return candidate
+        if inside_window(earliest):
+            if after_timestamp and TIKTOK_VARIATION_MINUTES > 0:
+                offset = random.randint(
+                    0,
+                    TIKTOK_VARIATION_MINUTES,
+                )
+                target = earliest + timedelta(minutes=offset)
+                if target.hour < TIKTOK_UPLOAD_END_HOUR:
+                    return target
+                earliest = target
 
-        tomorrow = today + timedelta(days=1)
-        base = datetime.combine(
-            tomorrow,
+            if inside_window(earliest):
+                return earliest
+
+        # Buscar la próxima apertura de ventana.
+        day = earliest.date()
+        if earliest.hour >= TIKTOK_UPLOAD_END_HOUR:
+            day += timedelta(days=1)
+
+        target = datetime.combine(
+            day,
             datetime.min.time(),
         ).replace(hour=TIKTOK_UPLOAD_START_HOUR, minute=0)
-        offset = random.randint(
-            -TIKTOK_VARIATION_MINUTES,
-            TIKTOK_VARIATION_MINUTES
-        )
-        return base + timedelta(minutes=offset)
+
+        if TIKTOK_VARIATION_MINUTES > 0:
+            target += timedelta(
+                minutes=random.randint(
+                    0,
+                    TIKTOK_VARIATION_MINUTES,
+                )
+            )
+
+        # Si la ventana empieza en el pasado por alguna configuración extraña,
+        # garantizamos que el resultado sea realmente futuro.
+        if target <= now:
+            day = day + timedelta(days=1)
+            target = datetime.combine(
+                day,
+                datetime.min.time(),
+            ).replace(hour=TIKTOK_UPLOAD_START_HOUR, minute=0)
+
+        return target
+
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -3043,11 +3081,27 @@ class TikTokUploadManager:
                 target = None
 
             if target is None:
-                target = now if inside_window else self._next_schedule(now)
+                last_upload_timestamp = None
+                uploaded_items = [
+                    item for item in items.values()
+                    if item.get("status") == "uploaded"
+                    and item.get("uploaded_timestamp")
+                ]
+                if uploaded_items:
+                    uploaded_items.sort(
+                        key=lambda x: float(x.get("uploaded_timestamp", 0))
+                    )
+                    last_upload_timestamp = uploaded_items[-1].get("uploaded_timestamp")
+
+                target = self._next_schedule(
+                    now,
+                    after_timestamp=last_upload_timestamp,
+                )
                 item["scheduled_at"] = target.timestamp()
                 item["status"] = "queued"
                 self.save_state(state)
 
+                item["scheduled_at"] = target.timestamp()
             delay = (target - datetime.now()).total_seconds()
             if delay > 0:
                 self.log(
@@ -3075,6 +3129,7 @@ class TikTokUploadManager:
                 item["status"] = "uploaded"
                 item["uploaded_date"] = now.strftime("%Y-%m-%d")
                 item["uploaded_at"] = now.isoformat()
+                item["uploaded_timestamp"] = time.time()
                 item["scheduled_at"] = None
                 self.save_state(state)
                 self.log(f"✅ TikTok: publicado → {video_path.name}")
