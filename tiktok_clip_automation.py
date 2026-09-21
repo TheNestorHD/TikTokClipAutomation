@@ -3307,6 +3307,9 @@ class TikTokClipAutomationApp:
 
 
 def reload_config_from_env():
+    # Releer el archivo por si fue editado fuera de la GUI.
+    load_dotenv(ENV_FILE, override=True)
+
     global CLIPS_DIR, OUTPUT_DIR, USED_DIR, DIVIDER_PATH, FONT_PATH, CLIP_REGISTRY_FILE
     global TARGET_W, TARGET_H, DIVIDER_H
     global SUB_SIZE, SUB_Y_OFFSET, SUB_MAX_WORDS, SUB_COLOR, SUB_BORDER, SUB_BORDER_WIDTH
