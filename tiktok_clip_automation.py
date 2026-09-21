@@ -17,13 +17,13 @@ import threading
 import queue
 import random
 import hashlib
+import webbrowser
 from datetime import datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
 
 import tkinter as tk
-from tkinter import ttk, messagebox
-from tkinter.scrolledtext import ScrolledText
+from tkinter import ttk, messagebox, filedialog
 sync_playwright = None
 
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
@@ -3246,219 +3246,1081 @@ class QueueTextWriter:
             except Exception:
                 pass
 
+
 class TikTokClipAutomationApp:
     TITLE = "TikTok Clip Automation"
+    NVIDIA_KEY_URL = "https://build.nvidia.com/settings/api-keys"
+    NVIDIA_MODELS_URL = "https://build.nvidia.com/explore"
+    COOKIES_EXTENSION_URL = (
+        "https://chromewebstore.google.com/detail/get-cookiestxt-locally/"
+        "cclelndahbckbenkjhflpdbgdldlbecc"
+    )
+    TIKTOK_STUDIO_URL = "https://www.tiktok.com/tiktokstudio/upload?lang=en"
 
-    ENV_FIELDS = {
-        "Canal de Kick": "KICK_CHANNEL",
-        "Intervalo watcher (s)": "KICK_POLL_SECONDS",
-        "Backoff API (s)": "KICK_ERROR_BACKOFF_SECONDS",
-        "NVIDIA API Key": "NVIDIA_API_KEY",
-        "Reintentos NVIDIA 5xx": "FACE_SERVER_ERROR_RETRIES",
-        "Cooldown mismo momento (s)": "SAME_MOMENT_COOLDOWN_SECONDS",
-        "Cooldown entre procesamientos (s)": "PROCESS_QUEUE_COOLDOWN_SECONDS",
-        "Clips": "CLIPS_DIR",
-        "Reels": "OUTPUT_DIR",
-        "Usados": "USED_DIR",
-        "Divisor": "DIVIDER_PATH",
-        "Fuente": "FONT_PATH",
-        "Whisper CLI": "WHISPER_CPP_EXE",
-        "Whisper modelo": "WHISPER_CPP_MODEL",
-        "Cookies TikTok": "TIKTOK_COOKIES_FILE",
-        "Auto-subida TikTok (true/false)": "TIKTOK_AUTO_UPLOAD",
-        "TikTok sin navegador visible (true/false)": "TIKTOK_HEADLESS",
-        "Inicio TikTok": "TIKTOK_UPLOAD_START_HOUR",
-        "Fin TikTok": "TIKTOK_UPLOAD_END_HOUR",
-        "Máx. TikTok/día": "TIKTOK_MAX_PER_DAY",
-        "Variación TikTok (min)": "TIKTOK_VARIATION_MINUTES",
-        "Intervalo entre TikToks (min)": "TIKTOK_UPLOAD_INTERVAL_MINUTES",
-        "Reintentos TikTok": "TIKTOK_UPLOAD_RETRIES",
-        "Espera entre reintentos TikTok (s)": "TIKTOK_UPLOAD_RETRY_DELAY_SECONDS",
-        "TikTok ventana visible minimizada (true/false)": "TIKTOK_MINIMIZED",
-        "Tiempo máx. procesamiento TikTok (s)": "TIKTOK_PROCESSING_TIMEOUT_SECONDS",
-        "Tiempo máx. confirmación TikTok (s)": "TIKTOK_CONFIRM_TIMEOUT_SECONDS",
-        "Caption": "TIKTOK_CAPTION_TEMPLATE",
-    }
+    BG = "#0B0F17"
+    SIDEBAR = "#101725"
+    CARD = "#151E2E"
+    CARD_ALT = "#1B263A"
+    BORDER = "#28364C"
+    TEXT = "#F3F5F9"
+    MUTED = "#8F9BB2"
+    ACCENT = "#6C63FF"
+    ACCENT_HOVER = "#7D75FF"
+    GREEN = "#3DDC97"
+    YELLOW = "#FFC857"
+    RED = "#FF5D73"
+    BLUE = "#51A8FF"
 
     def __init__(self, root):
         self.root = root
         self.root.title(self.TITLE)
-        self.root.geometry("1120x760")
-        self.root.minsize(960, 650)
+        self.root.geometry("1320x820")
+        self.root.minsize(1120, 720)
 
         self.output_queue = queue.Queue()
         self.stop_event = threading.Event()
         self.watcher_thread = None
         self.tiktok_manager = None
         self.entry_vars = {}
+        self.current_page = None
+        self.running = False
+        self.start_time = None
+        self.pulse = False
+        self.key_visible = False
+
         self.status_var = tk.StringVar(value="Detenido")
+        self.stage_var = tk.StringVar(value="Esperando")
+        self.uptime_var = tk.StringVar(value="00:00:00")
+        self.activity_var = tk.StringVar(value="El pipeline está detenido.")
         self.watcher_var = tk.StringVar(value="Watcher detenido")
         self.tiktok_var = tk.StringVar(value="TikTok detenido")
+        self.download_queue_var = tk.StringVar(value="0")
+        self.process_queue_var = tk.StringVar(value="0")
+        self.tiktok_queue_var = tk.StringVar(value="0")
+        self.processed_var = tk.StringVar(value="0")
+        self.failed_var = tk.StringVar(value="0")
+        self.dedupe_var = tk.StringVar(value="0")
+        self.ffmpeg_var = tk.StringVar(value="Muy baja · Idle")
 
-        self._build_style()
+        self.auto_upload_var = tk.BooleanVar(value=True)
+        self.headless_var = tk.BooleanVar(value=True)
+        self.ffmpeg_priority_var = tk.StringVar(value="idle")
+
+        try:
+            import customtkinter as ctk
+            self.ctk = ctk
+        except ImportError as exc:
+            root.withdraw()
+            messagebox.showerror(
+                self.TITLE,
+                "Falta customtkinter. Ejecutá:\n\npip install customtkinter\n\n"
+                f"Detalle: {exc}",
+            )
+            root.destroy()
+            return
+
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("dark-blue")
+
         self._build_ui()
         self._refresh_config_vars()
         self._install_output_redirect()
-        self.root.after(100, self._drain_output_queue)
+
+        self._show_page("dashboard")
+        self._tick_ui()
+        self._refresh_views()
+
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def _build_style(self):
-        style = ttk.Style(self.root)
-        try:
-            style.theme_use("vista")
-        except tk.TclError:
-            pass
-        style.configure("Title.TLabel", font=("Segoe UI", 20, "bold"))
-        style.configure("Status.TLabel", font=("Segoe UI", 11, "bold"))
-        style.configure("Accent.TButton", font=("Segoe UI", 10, "bold"))
+    # --------------------------------------------------------
+    # UI base
+    # --------------------------------------------------------
+
+    def _frame(self, parent, **kwargs):
+        return self.ctk.CTkFrame(
+            parent,
+            fg_color=kwargs.pop("fg_color", self.CARD),
+            border_width=kwargs.pop("border_width", 0),
+            border_color=kwargs.pop("border_color", self.BORDER),
+            corner_radius=kwargs.pop("corner_radius", 14),
+            **kwargs,
+        )
+
+    def _label(self, parent, text="", size=14, color=None, bold=False, **kwargs):
+        return self.ctk.CTkLabel(
+            parent,
+            text=text,
+            text_color=color or self.TEXT,
+            font=self.ctk.CTkFont(
+                family="Segoe UI",
+                size=size,
+                weight="bold" if bold else "normal",
+            ),
+            **kwargs,
+        )
+
+    def _button(self, parent, text, command, width=150, primary=False, **kwargs):
+        return self.ctk.CTkButton(
+            parent,
+            text=text,
+            command=command,
+            width=width,
+            height=38,
+            corner_radius=10,
+            fg_color=self.ACCENT if primary else self.CARD_ALT,
+            hover_color=self.ACCENT_HOVER if primary else self.BORDER,
+            text_color=self.TEXT,
+            font=self.ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
+            **kwargs,
+        )
 
     def _build_ui(self):
-        main = ttk.Frame(self.root, padding=16)
-        main.pack(fill="both", expand=True)
-
-        header = ttk.Frame(main)
-        header.pack(fill="x")
-
-        ttk.Label(
-            header,
-            text=f"{self.TITLE}  v{APP_VERSION}",
-            style="Title.TLabel",
-        ).pack(side="left")
-        ttk.Label(
-            header,
-            textvariable=self.status_var,
-            style="Status.TLabel",
-        ).pack(side="right")
-
-        notebook = ttk.Notebook(main)
-        notebook.pack(fill="both", expand=True, pady=(14, 0))
-
-        config_tab = ttk.Frame(notebook, padding=12)
-        pipeline_tab = ttk.Frame(notebook, padding=12)
-        logs_tab = ttk.Frame(notebook, padding=12)
-
-        notebook.add(config_tab, text="Configuración")
-        notebook.add(pipeline_tab, text="Pipeline")
-        notebook.add(logs_tab, text="Logs")
-
-        self._build_config_tab(config_tab)
-        self._build_pipeline_tab(pipeline_tab)
-        self._build_logs_tab(logs_tab)
-
-    def _build_config_tab(self, parent):
-        canvas = tk.Canvas(parent, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
-        inner = ttk.Frame(canvas)
-
-        inner.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        root_frame = self.ctk.CTkFrame(
+            self.root,
+            fg_color=self.BG,
+            corner_radius=0,
         )
-        canvas.create_window((0, 0), window=inner, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
+        root_frame.pack(fill="both", expand=True)
 
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        self.sidebar = self.ctk.CTkFrame(
+            root_frame,
+            width=235,
+            fg_color=self.SIDEBAR,
+            corner_radius=0,
+        )
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
 
-        for row, (label, key) in enumerate(self.ENV_FIELDS.items()):
-            ttk.Label(inner, text=label).grid(
-                row=row, column=0, sticky="w", padx=(0, 12), pady=6
+        content = self.ctk.CTkFrame(
+            root_frame,
+            fg_color=self.BG,
+            corner_radius=0,
+        )
+        content.pack(side="right", fill="both", expand=True)
+
+        brand = self._frame(self.sidebar, fg_color=self.SIDEBAR, corner_radius=0)
+        brand.pack(fill="x", padx=18, pady=(24, 18))
+
+        self._label(
+            brand,
+            "TTCA",
+            size=30,
+            color=self.ACCENT,
+            bold=True,
+        ).pack(anchor="w")
+        self._label(
+            brand,
+            "TikTok Clip Automation",
+            size=12,
+            color=self.MUTED,
+        ).pack(anchor="w", pady=(0, 2))
+        self._label(
+            brand,
+            f"v{APP_VERSION}",
+            size=10,
+            color=self.MUTED,
+        ).pack(anchor="w")
+
+        self.nav_buttons = {}
+        nav = [
+            ("dashboard", "⌂", "Inicio"),
+            ("setup", "⚙", "Configuración"),
+            ("pipeline", "⚡", "Pipeline"),
+            ("tiktok", "▶", "TikTok"),
+            ("activity", "≡", "Actividad"),
+        ]
+        for page_id, icon, label in nav:
+            btn = self.ctk.CTkButton(
+                self.sidebar,
+                text=f"{icon}   {label}",
+                anchor="w",
+                height=44,
+                corner_radius=10,
+                fg_color="transparent",
+                hover_color=self.CARD_ALT,
+                text_color=self.TEXT,
+                font=self.ctk.CTkFont(family="Segoe UI", size=13, weight="bold"),
+                command=lambda pid=page_id: self._show_page(pid),
+            )
+            btn.pack(fill="x", padx=14, pady=4)
+            self.nav_buttons[page_id] = btn
+
+        self.sidebar_spacer = self.ctk.CTkFrame(
+            self.sidebar, fg_color="transparent"
+        )
+        self.sidebar_spacer.pack(fill="both", expand=True)
+
+        self._label(
+            self.sidebar,
+            "Procesamiento",
+            size=11,
+            color=self.MUTED,
+        ).pack(anchor="w", padx=18, pady=(0, 3))
+        self._label(
+            self.sidebar,
+            "FFmpeg · prioridad muy baja",
+            size=11,
+            color=self.GREEN,
+        ).pack(anchor="w", padx=18, pady=(0, 20))
+
+        header = self.ctk.CTkFrame(content, fg_color=self.BG, height=72, corner_radius=0)
+        header.pack(fill="x", padx=28, pady=(18, 0))
+        header.pack_propagate(False)
+
+        left = self.ctk.CTkFrame(header, fg_color="transparent")
+        left.pack(side="left", fill="y")
+
+        self.header_title = self._label(
+            left, "Inicio", size=25, bold=True
+        )
+        self.header_title.pack(anchor="w")
+        self.header_subtitle = self._label(
+            left, "Todo listo para automatizar.",
+            size=11, color=self.MUTED
+        )
+        self.header_subtitle.pack(anchor="w")
+
+        status_box = self.ctk.CTkFrame(header, fg_color=self.CARD, corner_radius=12)
+        status_box.pack(side="right", padx=0, pady=4)
+
+        self.status_dot = self._label(
+            status_box,
+            "●",
+            size=17,
+            color=self.RED,
+            bold=True,
+        )
+        self.status_dot.pack(side="left", padx=(13, 4))
+        self.header_status = self._label(
+            status_box, "Detenido", size=12, bold=True
+        )
+        self.header_status.pack(side="left", padx=(0, 13))
+
+        self.pages_container = self.ctk.CTkFrame(
+            content, fg_color=self.BG, corner_radius=0
+        )
+        self.pages_container.pack(fill="both", expand=True, padx=28, pady=(8, 22))
+
+        self.pages = {}
+        for page_id in ("dashboard", "setup", "pipeline", "tiktok", "activity"):
+            page = self.ctk.CTkFrame(
+                self.pages_container,
+                fg_color=self.BG,
+                corner_radius=0,
+            )
+            self.pages[page_id] = page
+
+        self._build_dashboard(self.pages["dashboard"])
+        self._build_setup(self.pages["setup"])
+        self._build_pipeline(self.pages["pipeline"])
+        self._build_tiktok(self.pages["tiktok"])
+        self._build_activity(self.pages["activity"])
+
+    def _show_page(self, page_id):
+        for page in self.pages.values():
+            page.pack_forget()
+        self.pages[page_id].pack(fill="both", expand=True)
+        self.current_page = page_id
+
+        labels = {
+            "dashboard": ("Inicio", "Resumen del sistema y estado del pipeline."),
+            "setup": ("Configuración", "Configuración guiada: sin tocar archivos a mano."),
+            "pipeline": ("Pipeline", "Descarga, IA, Whisper y render, todo supervisado."),
+            "tiktok": ("TikTok", "Publicación automática en cuanto termina cada Reel."),
+            "activity": ("Actividad", "Logs en vivo y diagnóstico."),
+        }
+        title, subtitle = labels[page_id]
+        self.header_title.configure(text=title)
+        self.header_subtitle.configure(text=subtitle)
+
+        for key, btn in self.nav_buttons.items():
+            btn.configure(
+                fg_color=self.ACCENT if key == page_id else "transparent"
             )
 
-            var = tk.StringVar()
-            self.entry_vars[key] = var
+    # --------------------------------------------------------
+    # Dashboard
+    # --------------------------------------------------------
 
-            show = "*" if key == "NVIDIA_API_KEY" else ""
-            entry = ttk.Entry(inner, textvariable=var, width=78, show=show)
-            entry.grid(row=row, column=1, sticky="ew", pady=6)
-
-        inner.columnconfigure(1, weight=1)
-
-        ttk.Label(
-            inner,
-            text=(
-                "Las rutas relativas se resuelven respecto a la carpeta del programa. "
-                "El .env y las cookies de TikTok no deberían subirse a Git."
-            ),
-            wraplength=780,
-        ).grid(row=len(self.ENV_FIELDS), column=0, columnspan=2, sticky="w", pady=(16, 8))
-
-        buttons = ttk.Frame(inner)
-        buttons.grid(row=len(self.ENV_FIELDS) + 1, column=0, columnspan=2, sticky="w", pady=8)
-        ttk.Button(
-            buttons,
-            text="Guardar .env",
-            style="Accent.TButton",
-            command=self.save_settings,
-        ).pack(side="left", padx=(0, 8))
-        ttk.Button(
-            buttons,
-            text="Recargar",
-            command=self._refresh_config_vars,
-        ).pack(side="left")
-
-    def _build_pipeline_tab(self, parent):
-        info = ttk.LabelFrame(parent, text="Estado", padding=12)
-        info.pack(fill="x", pady=(0, 12))
-
-        ttk.Label(info, textvariable=self.watcher_var).pack(anchor="w", pady=3)
-        ttk.Label(info, textvariable=self.tiktok_var).pack(anchor="w", pady=3)
-
-        controls = ttk.LabelFrame(parent, text="Controles", padding=12)
-        controls.pack(fill="x", pady=(0, 12))
-
-        self.start_button = ttk.Button(
-            controls,
-            text="▶ Iniciar pipeline",
-            style="Accent.TButton",
-            command=self.start_pipeline,
+    def _stat_card(self, parent, title, variable, icon):
+        card = self._frame(parent, fg_color=self.CARD)
+        card.pack(side="left", fill="both", expand=True, padx=5)
+        top = self.ctk.CTkFrame(card, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(14, 0))
+        self._label(top, icon, size=17, color=self.ACCENT, bold=True).pack(side="left")
+        self._label(top, title, size=11, color=self.MUTED, bold=True).pack(
+            side="left", padx=8
         )
-        self.start_button.pack(side="left", padx=(0, 8))
-
-        self.stop_button = ttk.Button(
-            controls,
-            text="■ Detener",
-            command=self.stop_pipeline,
-            state="disabled",
+        self._label(card, variable.get(), size=27, bold=True).pack(
+            anchor="w", padx=16, pady=(7, 14)
         )
-        self.stop_button.pack(side="left", padx=(0, 8))
+        # Keep a direct reference for updates.
+        return card
 
-        ttk.Button(
+    def _build_dashboard(self, parent):
+        hero = self._frame(parent, fg_color=self.CARD)
+        hero.pack(fill="x", pady=(4, 15))
+
+        left = self.ctk.CTkFrame(hero, fg_color="transparent")
+        left.pack(side="left", fill="both", expand=True, padx=22, pady=22)
+
+        self._label(
+            left,
+            "Automatización activa",
+            size=12,
+            color=self.ACCENT,
+            bold=True,
+        ).pack(anchor="w")
+        self.activity_big = self._label(
+            left,
+            "Esperando un nuevo clip de Kick…",
+            size=24,
+            bold=True,
+            wraplength=650,
+            justify="left",
+        )
+        self.activity_big.pack(anchor="w", pady=(8, 4))
+        self._label(
+            left,
+            "El programa detecta, descarga, edita, subtitula y publica sin intervención.",
+            size=12,
+            color=self.MUTED,
+            wraplength=680,
+            justify="left",
+        ).pack(anchor="w")
+
+        right = self.ctk.CTkFrame(hero, fg_color="transparent", width=280)
+        right.pack(side="right", padx=22, pady=22)
+        right.pack_propagate(False)
+
+        self._label(right, "ETAPA ACTUAL", size=10, color=self.MUTED, bold=True).pack(
+            anchor="w"
+        )
+        self.dashboard_stage = self._label(
+            right, "Esperando", size=17, color=self.TEXT, bold=True
+        )
+        self.dashboard_stage.pack(anchor="w", pady=(6, 12))
+
+        self.activity_progress = self.ctk.CTkProgressBar(
+            right,
+            height=8,
+            corner_radius=6,
+            fg_color=self.CARD_ALT,
+            progress_color=self.ACCENT,
+            mode="indeterminate",
+        )
+        self.activity_progress.pack(fill="x")
+        self.activity_progress.stop()
+
+        self._label(right, "TIEMPO ACTIVO", size=10, color=self.MUTED, bold=True).pack(
+            anchor="w", pady=(18, 0)
+        )
+        self._label(right, self.uptime_var, size=17, bold=True).pack(anchor="w", pady=(5, 0))
+
+        stats = self.ctk.CTkFrame(parent, fg_color="transparent")
+        stats.pack(fill="x", pady=(0, 15))
+        self._build_stat_update_cards(stats)
+
+        lower = self.ctk.CTkFrame(parent, fg_color="transparent")
+        lower.pack(fill="both", expand=True)
+
+        status_card = self._frame(lower, fg_color=self.CARD)
+        status_card.pack(side="left", fill="both", expand=True, padx=(0, 8))
+
+        self._label(status_card, "Estado del sistema", size=15, bold=True).pack(
+            anchor="w", padx=18, pady=(16, 10)
+        )
+
+        self.system_rows = {}
+        for key, label in [
+            ("watcher", "Watcher Kick"),
+            ("download", "Descargas"),
+            ("processor", "Procesamiento"),
+            ("tiktok", "TikTok"),
+            ("ffmpeg", "FFmpeg"),
+        ]:
+            row = self.ctk.CTkFrame(status_card, fg_color=self.CARD_ALT, corner_radius=9)
+            row.pack(fill="x", padx=16, pady=5)
+            self._label(row, label, size=11, color=self.MUTED).pack(
+                side="left", padx=12, pady=9
+            )
+            value = self._label(row, "—", size=11, bold=True)
+            value.pack(side="right", padx=12)
+            self.system_rows[key] = value
+
+        actions = self._frame(lower, fg_color=self.CARD)
+        actions.pack(side="right", fill="both", expand=True, padx=(8, 0))
+        self._label(actions, "Acciones rápidas", size=15, bold=True).pack(
+            anchor="w", padx=18, pady=(16, 10)
+        )
+
+        action_wrap = self.ctk.CTkFrame(actions, fg_color="transparent")
+        action_wrap.pack(fill="x", padx=16)
+
+        self.start_button = self._button(
+            action_wrap,
+            "▶  Iniciar automatización",
+            self.start_pipeline,
+            width=240,
+            primary=True,
+        )
+        self.start_button.pack(fill="x", pady=4)
+
+        self.stop_button = self._button(
+            action_wrap,
+            "■  Detener",
+            self.stop_pipeline,
+            width=240,
+        )
+        self.stop_button.pack(fill="x", pady=4)
+        self.stop_button.configure(state="disabled")
+
+        self._button(
+            action_wrap,
+            "↻  Procesar clips existentes",
+            self.process_existing_async,
+            width=240,
+        ).pack(fill="x", pady=4)
+
+        setup_hint = self._frame(actions, fg_color=self.CARD_ALT)
+        setup_hint.pack(fill="x", padx=16, pady=(15, 16))
+        self._label(
+            setup_hint,
+            "¿Es la primera vez?",
+            size=11,
+            color=self.YELLOW,
+            bold=True,
+        ).pack(anchor="w", padx=12, pady=(10, 2))
+        self._label(
+            setup_hint,
+            "Configurá NVIDIA y las cookies de TikTok desde Configuración.",
+            size=11,
+            color=self.MUTED,
+            wraplength=350,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(0, 10))
+
+    def _build_stat_update_cards(self, parent):
+        self._make_number_card(
+            parent, "Descargas pendientes", self.download_queue_var, "↓"
+        )
+        self._make_number_card(
+            parent, "Procesando", self.process_queue_var, "⚡"
+        )
+        self._make_number_card(
+            parent, "TikToks en cola", self.tiktok_queue_var, "▶"
+        )
+        self._make_number_card(
+            parent, "Fallos", self.failed_var, "!"
+        )
+
+    def _make_number_card(self, parent, title, variable, icon):
+        card = self._frame(parent, fg_color=self.CARD)
+        card.pack(side="left", fill="both", expand=True, padx=5)
+        self._label(card, f"{icon}  {title}", size=10, color=self.MUTED, bold=True).pack(
+            anchor="w", padx=15, pady=(13, 0)
+        )
+        label = self._label(card, variable.get(), size=25, bold=True)
+        label.pack(anchor="w", padx=15, pady=(2, 13))
+        variable.trace_add(
+            "write",
+            lambda *_args, target=label, var=variable: target.configure(text=var.get())
+        )
+
+    # --------------------------------------------------------
+    # Setup
+    # --------------------------------------------------------
+
+    def _build_setup(self, parent):
+        scroll = self.ctk.CTkScrollableFrame(
+            parent,
+            fg_color=self.BG,
+            corner_radius=0,
+        )
+        scroll.pack(fill="both", expand=True)
+
+        self._setup_card(
+            scroll,
+            "1",
+            "Canal de Kick",
+            "Escribí el nombre del canal que querés monitorear.",
+            self._make_entry_row,
+            {"key": "KICK_CHANNEL", "placeholder": "ej. eskrotos"},
+        )
+
+        self._setup_card(
+            scroll,
+            "2",
+            "NVIDIA API Key",
+            "La clave se guarda solamente en el .env local del programa.",
+            self._make_api_row,
+            {},
+        )
+
+        self._setup_card(
+            scroll,
+            "3",
+            "Cookies de TikTok",
+            "Exportá tus cookies en formato Netscape cookies.txt y seleccioná el archivo.",
+            self._make_cookie_row,
+            {},
+        )
+
+        tiktok_card = self._frame(scroll, fg_color=self.CARD)
+        tiktok_card.pack(fill="x", pady=(10, 10), padx=4)
+        self._label(tiktok_card, "4", size=14, color=self.ACCENT, bold=True).pack(
+            side="left", padx=(18, 10), pady=17
+        )
+        body = self.ctk.CTkFrame(tiktok_card, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=(0, 18), pady=14)
+        self._label(body, "Publicación TikTok", size=15, bold=True).pack(anchor="w")
+        self._label(
+            body,
+            "Publica automáticamente en cuanto termina cada Reel. No hay horarios, franjas ni límites artificiales.",
+            size=11,
+            color=self.MUTED,
+            wraplength=720,
+            justify="left",
+        ).pack(anchor="w", pady=(3, 10))
+        self.auto_upload_switch = self.ctk.CTkSwitch(
+            body,
+            text="Activar publicación automática",
+            variable=self.auto_upload_var,
+            onvalue=True,
+            offvalue=False,
+            progress_color=self.ACCENT,
+            button_color=self.ACCENT,
+            button_hover_color=self.ACCENT_HOVER,
+        )
+        self.auto_upload_switch.pack(anchor="w", pady=(0, 6))
+
+        self.headless_switch = self.ctk.CTkSwitch(
+            body,
+            text="Usar navegador TikTok sin ventana visible",
+            variable=self.headless_var,
+            onvalue=True,
+            offvalue=False,
+            progress_color=self.ACCENT,
+            button_color=self.ACCENT,
+            button_hover_color=self.ACCENT_HOVER,
+        )
+        self.headless_switch.pack(anchor="w", pady=3)
+
+        self._setup_card(
+            scroll,
+            "5",
+            "Rendimiento",
+            "FFmpeg se ejecuta con prioridad muy baja y con menos hilos para que el PC del streamer siga usable.",
+            self._make_performance_row,
+            {},
+        )
+
+        self._setup_card(
+            scroll,
+            "6",
+            "Rutas y herramientas",
+            "Las rutas pueden ser absolutas o relativas a la carpeta de TTCA.",
+            self._make_paths_form,
+            {},
+        )
+
+        save = self._frame(scroll, fg_color=self.CARD)
+        save.pack(fill="x", pady=10, padx=4)
+        self._button(save, "💾 Guardar configuración", self.save_settings, width=210, primary=True).pack(
+            side="left", padx=16, pady=14
+        )
+        self._button(save, "↻ Recargar", self._refresh_config_vars, width=120).pack(
+            side="left", padx=4, pady=14
+        )
+        self.setup_status = self._label(save, "Configuración sin guardar.", size=11, color=self.MUTED)
+        self.setup_status.pack(side="left", padx=18)
+
+    def _setup_card(self, parent, number, title, description, builder, kwargs):
+        card = self._frame(parent, fg_color=self.CARD)
+        card.pack(fill="x", pady=6, padx=4)
+        self._label(card, number, size=14, color=self.ACCENT, bold=True).pack(
+            side="left", padx=(18, 10), pady=16
+        )
+        body = self.ctk.CTkFrame(card, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=(0, 18), pady=14)
+        self._label(body, title, size=15, bold=True).pack(anchor="w")
+        self._label(
+            body,
+            description,
+            size=11,
+            color=self.MUTED,
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", pady=(3, 9))
+        builder(body, **kwargs)
+
+    def _ensure_var(self, key, value=""):
+        if key not in self.entry_vars:
+            self.entry_vars[key] = tk.StringVar()
+        return self.entry_vars[key]
+
+    def _make_entry_row(self, parent, key, placeholder=""):
+        row = self.ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x")
+        var = self._ensure_var(key)
+        self.kick_entry = self.ctk.CTkEntry(
+            row,
+            textvariable=var,
+            height=38,
+            placeholder_text=placeholder,
+        )
+        self.kick_entry.pack(side="left", fill="x", expand=True)
+        return row
+
+    def _make_api_row(self, parent):
+        row = self.ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x")
+        var = self._ensure_var("NVIDIA_API_KEY")
+        self.api_entry = self.ctk.CTkEntry(
+            row,
+            textvariable=var,
+            height=38,
+            show="*",
+        )
+        self.api_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self._button(row, "Mostrar", self._toggle_api_visibility, width=95).pack(
+            side="left", padx=4
+        )
+        self._button(
+            row,
+            "🔑 Obtener API Key",
+            lambda: self._open_url(self.NVIDIA_KEY_URL),
+            width=160,
+        ).pack(side="left", padx=4)
+        self._button(
+            row,
+            "Modelos",
+            lambda: self._open_url(self.NVIDIA_MODELS_URL),
+            width=100,
+        ).pack(side="left", padx=4)
+
+    def _make_cookie_row(self, parent):
+        row = self.ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x")
+
+        var = self._ensure_var("TIKTOK_COOKIES_FILE")
+        self.cookies_entry = self.ctk.CTkEntry(
+            row,
+            textvariable=var,
+            height=38,
+        )
+        self.cookies_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        self._button(row, "Seleccionar", self._choose_cookie_file, width=110).pack(
+            side="left", padx=4
+        )
+        self._button(
+            row,
+            "🍪 Extensión",
+            lambda: self._open_url(self.COOKIES_EXTENSION_URL),
+            width=110,
+        ).pack(side="left", padx=4)
+        self._button(
+            row,
+            "TikTok Studio",
+            lambda: self._open_url(self.TIKTOK_STUDIO_URL),
+            width=120,
+        ).pack(side="left", padx=4
+        )
+
+        self.cookie_status = self._label(parent, "No comprobado.", size=10, color=self.MUTED)
+        self.cookie_status.pack(anchor="w", pady=(7, 0))
+
+    def _make_performance_row(self, parent):
+        row = self.ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x")
+
+        self._label(row, "Prioridad FFmpeg", size=11, color=self.MUTED, bold=True).pack(
+            side="left", padx=(0, 10)
+        )
+        self.ffmpeg_menu = self.ctk.CTkOptionMenu(
+            row,
+            values=["Normal", "Baja", "Muy baja"],
+            variable=tk.StringVar(value="Muy baja"),
+            width=145,
+            height=36,
+            fg_color=self.CARD_ALT,
+            button_color=self.ACCENT,
+            button_hover_color=self.ACCENT_HOVER,
+        )
+        self.ffmpeg_menu.pack(side="left")
+
+        # Use an independent env variable through a trace-free helper.
+        self.ffmpeg_ui_value = tk.StringVar(value="Muy baja")
+
+        note = self._label(
+            row,
+            "  Recomendado para streaming: Muy baja (Idle) + CPU limitada.",
+            size=10,
+            color=self.GREEN,
+        )
+        note.pack(side="left", padx=12)
+
+        self.ffmpeg_menu.configure(command=self._on_ffmpeg_menu_change)
+
+    def _make_paths_form(self, parent):
+        fields = [
+            ("CLIPS_DIR", "Clips"),
+            ("OUTPUT_DIR", "Reels"),
+            ("USED_DIR", "Usados"),
+            ("DIVIDER_PATH", "Divisor"),
+            ("FONT_PATH", "Fuente"),
+            ("WHISPER_CPP_EXE", "Whisper CLI"),
+            ("WHISPER_CPP_MODEL", "Whisper modelo"),
+        ]
+        self.path_widgets = {}
+        for key, label in fields:
+            row = self.ctk.CTkFrame(parent, fg_color="transparent")
+            row.pack(fill="x", pady=3)
+            self._label(row, label, size=10, color=self.MUTED, width=120, anchor="w").pack(
+                side="left"
+            )
+            var = self._ensure_var(key)
+            entry = self.ctk.CTkEntry(row, textvariable=var, height=34)
+            entry.pack(side="left", fill="x", expand=True, padx=(0, 7))
+            self.path_widgets[key] = entry
+
+            command = self._choose_directory if key in {"CLIPS_DIR", "OUTPUT_DIR", "USED_DIR"} else self._choose_file_for_key
+            self._button(
+                row,
+                "Examinar",
+                lambda k=key, cmd=command: cmd(k),
+                width=88,
+            ).pack(side="left")
+
+    # --------------------------------------------------------
+    # Pipeline
+    # --------------------------------------------------------
+
+    def _build_pipeline(self, parent):
+        top = self._frame(parent, fg_color=self.CARD)
+        top.pack(fill="x", pady=(4, 10))
+        self._label(top, "Control del pipeline", size=15, bold=True).pack(
+            side="left", padx=18, pady=15
+        )
+        self.pipeline_status_label = self._label(
+            top, "Detenido", size=12, color=self.RED, bold=True
+        )
+        self.pipeline_status_label.pack(side="right", padx=18)
+
+        controls = self.ctk.CTkFrame(parent, fg_color="transparent")
+        controls.pack(fill="x", pady=(0, 10))
+        self._button(
+            controls, "▶ Iniciar", self.start_pipeline, width=130, primary=True
+        ).pack(side="left", padx=(0, 6))
+        self._button(
+            controls, "■ Detener", self.stop_pipeline, width=120
+        ).pack(side="left", padx=6)
+        self._button(
             controls,
-            text="Procesar clips existentes",
-            command=self.process_existing_async,
-        ).pack(side="left")
+            "↻ Encolar existentes",
+            self.process_existing_async,
+            width=160,
+        ).pack(side="left", padx=6)
 
-        queue_frame = ttk.LabelFrame(parent, text="Cola de TikTok", padding=10)
-        queue_frame.pack(fill="both", expand=True)
+        queue_card = self._frame(parent, fg_color=self.CARD)
+        queue_card.pack(fill="both", expand=True)
 
-        self.queue_text = tk.Text(queue_frame, height=18, state="disabled")
-        self.queue_text.pack(fill="both", expand=True)
+        self._label(
+            queue_card,
+            "Colas en tiempo real",
+            size=15,
+            bold=True,
+        ).pack(anchor="w", padx=18, pady=(16, 5))
+        self._label(
+            queue_card,
+            "La descarga puede adelantarse, pero IA/Whisper/FFmpeg usan un único worker secuencial.",
+            size=10,
+            color=self.MUTED,
+        ).pack(anchor="w", padx=18, pady=(0, 12))
 
-        self._refresh_queue_view()
+        grid = self.ctk.CTkFrame(queue_card, fg_color="transparent")
+        grid.pack(fill="x", padx=14)
 
-    def _build_logs_tab(self, parent):
-        self.log_text = ScrolledText(parent, wrap="word", state="disabled", font=("Consolas", 9))
-        self.log_text.pack(fill="both", expand=True)
+        self.pipeline_cards = {}
+        entries = [
+            ("download", "Descargas pendientes", self.download_queue_var, "↓"),
+            ("process", "Procesamiento pendientes", self.process_queue_var, "⚡"),
+            ("tiktok", "TikToks pendientes", self.tiktok_queue_var, "▶"),
+            ("failed", "Fallos", self.failed_var, "!"),
+        ]
+        for idx, (key, title, var, icon) in enumerate(entries):
+            card = self._frame(grid, fg_color=self.CARD_ALT)
+            card.grid(row=0, column=idx, sticky="ew", padx=4)
+            grid.columnconfigure(idx, weight=1)
+            self._label(card, f"{icon} {title}", size=10, color=self.MUTED, bold=True).pack(
+                anchor="w", padx=13, pady=(11, 0)
+            )
+            self._label(card, var.get(), size=23, bold=True).pack(
+                anchor="w", padx=13, pady=(2, 11)
+            )
+            self.pipeline_cards[key] = card
+
+        status = self._frame(queue_card, fg_color=self.CARD_ALT)
+        status.pack(fill="x", padx=18, pady=18)
+        self._label(status, "Actividad", size=11, color=self.MUTED, bold=True).pack(
+            anchor="w", padx=13, pady=(10, 2)
+        )
+        self.pipeline_activity_label = self._label(
+            status,
+            self.activity_var.get(),
+            size=12,
+            wraplength=950,
+            justify="left",
+        )
+        self.pipeline_activity_label.pack(anchor="w", padx=13, pady=(0, 10))
+
+    # --------------------------------------------------------
+    # TikTok
+    # --------------------------------------------------------
+
+    def _build_tiktok(self, parent):
+        intro = self._frame(parent, fg_color=self.CARD)
+        intro.pack(fill="x", pady=(4, 10))
+        self._label(intro, "Publicación automática", size=17, bold=True).pack(
+            anchor="w", padx=18, pady=(15, 2)
+        )
+        self._label(
+            intro,
+            "Cuando termina un Reel, entra directamente a TikTok. No existen horarios ni esperas artificiales.",
+            size=11,
+            color=self.MUTED,
+        ).pack(anchor="w", padx=18, pady=(0, 14))
+
+        row = self.ctk.CTkFrame(intro, fg_color="transparent")
+        row.pack(fill="x", padx=18, pady=(0, 14))
+        self._label(row, "Publicación:", size=11, color=self.MUTED, bold=True).pack(side="left")
+        self.tiktok_status_big = self._label(row, "Desactivada", size=12, color=self.RED, bold=True)
+        self.tiktok_status_big.pack(side="left", padx=7)
+
+        queue = self._frame(parent, fg_color=self.CARD)
+        queue.pack(fill="both", expand=True)
+        top = self.ctk.CTkFrame(queue, fg_color="transparent")
+        top.pack(fill="x", padx=18, pady=(14, 8))
+        self._label(top, "Cola de publicaciones", size=15, bold=True).pack(side="left")
+        self._button(
+            top,
+            "🔁 Reintentar fallidos",
+            self.retry_failed_tiktok,
+            width=165,
+        ).pack(side="right")
+
+        self.tiktok_text = self.ctk.CTkTextbox(
+            queue,
+            fg_color=self.CARD_ALT,
+            text_color=self.TEXT,
+            border_width=0,
+            corner_radius=10,
+            font=self.ctk.CTkFont(family="Consolas", size=11),
+        )
+        self.tiktok_text.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+        self.tiktok_text.configure(state="disabled")
+
+    # --------------------------------------------------------
+    # Activity
+    # --------------------------------------------------------
+
+    def _build_activity(self, parent):
+        log_card = self._frame(parent, fg_color=self.CARD)
+        log_card.pack(fill="both", expand=True, pady=(4, 0))
+
+        head = self.ctk.CTkFrame(log_card, fg_color="transparent")
+        head.pack(fill="x", padx=18, pady=(14, 8))
+        self._label(head, "Logs en vivo", size=15, bold=True).pack(side="left")
+        self._button(head, "Limpiar", self.clear_logs, width=90).pack(side="right")
+
+        self.log_text = self.ctk.CTkTextbox(
+            log_card,
+            fg_color="#0A0E15",
+            text_color=self.TEXT,
+            border_width=0,
+            corner_radius=10,
+            font=self.ctk.CTkFont(family="Consolas", size=10),
+        )
+        self.log_text.pack(fill="both", expand=True, padx=18, pady=(0, 18))
+        self.log_text.configure(state="disabled")
+
+    # --------------------------------------------------------
+    # Config helpers
+    # --------------------------------------------------------
 
     def _refresh_config_vars(self):
         reload_config_from_env()
-        for key, var in self.entry_vars.items():
+        keys = [
+            "KICK_CHANNEL",
+            "KICK_POLL_SECONDS",
+            "KICK_ERROR_BACKOFF_SECONDS",
+            "NVIDIA_API_KEY",
+            "CLIPS_DIR",
+            "OUTPUT_DIR",
+            "USED_DIR",
+            "DIVIDER_PATH",
+            "FONT_PATH",
+            "WHISPER_CPP_EXE",
+            "WHISPER_CPP_MODEL",
+            "TIKTOK_COOKIES_FILE",
+            "TIKTOK_AUTO_UPLOAD",
+            "TIKTOK_HEADLESS",
+            "TIKTOK_CAPTION_TEMPLATE",
+            "FACE_SERVER_ERROR_RETRIES",
+            "SAME_MOMENT_COOLDOWN_SECONDS",
+            "PROCESS_QUEUE_COOLDOWN_SECONDS",
+            "FFMPEG_PRIORITY",
+            "FFMPEG_THREADS",
+            "TIKTOK_UPLOAD_RETRIES",
+            "TIKTOK_PROCESSING_TIMEOUT_SECONDS",
+            "TIKTOK_CONFIRM_TIMEOUT_SECONDS",
+        ]
+        for key in keys:
+            var = self._ensure_var(key)
             var.set(str(os.getenv(key, "")))
+
+        self.auto_upload_var.set(env_bool("TIKTOK_AUTO_UPLOAD", True))
+        self.headless_var.set(env_bool("TIKTOK_HEADLESS", True))
+
+        priority = env_value("FFMPEG_PRIORITY", "idle").strip().lower()
+        if priority == "normal":
+            label = "Normal"
+        elif priority == "below_normal":
+            label = "Baja"
+        else:
+            label = "Muy baja"
+        if hasattr(self, "ffmpeg_menu"):
+            self.ffmpeg_menu.set(label)
+        self.ffmpeg_ui_value.set(label)
+        self.ffmpeg_var.set(f"{label} · {priority}")
+
+        if hasattr(self, "cookie_status"):
+            self._refresh_cookie_status()
+        if hasattr(self, "setup_status"):
+            self.setup_status.configure(text="Configuración recargada.", text_color=self.GREEN)
 
     def save_settings(self):
         try:
             ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
-            for key, var in self.entry_vars.items():
-                set_key(str(ENV_FILE), key, var.get().strip(), quote_mode="auto")
+
+            values = {
+                "KICK_CHANNEL": self.entry_vars.get("KICK_CHANNEL", tk.StringVar()).get().strip(),
+                "KICK_POLL_SECONDS": self.entry_vars.get("KICK_POLL_SECONDS", tk.StringVar(value="1")).get().strip(),
+                "KICK_ERROR_BACKOFF_SECONDS": self.entry_vars.get("KICK_ERROR_BACKOFF_SECONDS", tk.StringVar(value="5")).get().strip(),
+                "NVIDIA_API_KEY": self.entry_vars.get("NVIDIA_API_KEY", tk.StringVar()).get().strip(),
+                "CLIPS_DIR": self.entry_vars.get("CLIPS_DIR", tk.StringVar()).get().strip(),
+                "OUTPUT_DIR": self.entry_vars.get("OUTPUT_DIR", tk.StringVar()).get().strip(),
+                "USED_DIR": self.entry_vars.get("USED_DIR", tk.StringVar()).get().strip(),
+                "DIVIDER_PATH": self.entry_vars.get("DIVIDER_PATH", tk.StringVar()).get().strip(),
+                "FONT_PATH": self.entry_vars.get("FONT_PATH", tk.StringVar()).get().strip(),
+                "WHISPER_CPP_EXE": self.entry_vars.get("WHISPER_CPP_EXE", tk.StringVar()).get().strip(),
+                "WHISPER_CPP_MODEL": self.entry_vars.get("WHISPER_CPP_MODEL", tk.StringVar()).get().strip(),
+                "TIKTOK_COOKIES_FILE": self.entry_vars.get("TIKTOK_COOKIES_FILE", tk.StringVar()).get().strip(),
+                "TIKTOK_AUTO_UPLOAD": "true" if self.auto_upload_var.get() else "false",
+                "TIKTOK_HEADLESS": "true" if self.headless_var.get() else "false",
+                "TIKTOK_CAPTION_TEMPLATE": self.entry_vars.get("TIKTOK_CAPTION_TEMPLATE", tk.StringVar(value="{title} #tiktok #kick")).get().strip(),
+                "FACE_SERVER_ERROR_RETRIES": self.entry_vars.get("FACE_SERVER_ERROR_RETRIES", tk.StringVar(value="0")).get().strip(),
+                "SAME_MOMENT_COOLDOWN_SECONDS": self.entry_vars.get("SAME_MOMENT_COOLDOWN_SECONDS", tk.StringVar(value="45")).get().strip(),
+                "PROCESS_QUEUE_COOLDOWN_SECONDS": self.entry_vars.get("PROCESS_QUEUE_COOLDOWN_SECONDS", tk.StringVar(value="5")).get().strip(),
+                "FFMPEG_PRIORITY": self.ffmpeg_ui_to_env(),
+                "FFMPEG_THREADS": self.entry_vars.get("FFMPEG_THREADS", tk.StringVar(value=str(max(1, (os.cpu_count() or 4)-2)))).get().strip(),
+                "TIKTOK_UPLOAD_RETRIES": self.entry_vars.get("TIKTOK_UPLOAD_RETRIES", tk.StringVar(value="3")).get().strip(),
+                "TIKTOK_PROCESSING_TIMEOUT_SECONDS": self.entry_vars.get("TIKTOK_PROCESSING_TIMEOUT_SECONDS", tk.StringVar(value="180")).get().strip(),
+                "TIKTOK_CONFIRM_TIMEOUT_SECONDS": self.entry_vars.get("TIKTOK_CONFIRM_TIMEOUT_SECONDS", tk.StringVar(value="90")).get().strip(),
+            }
+
+            for key, value in values.items():
+                set_key(str(ENV_FILE), key, value, quote_mode="auto")
+
             load_dotenv(ENV_FILE, override=True)
             reload_config_from_env()
             ensure_dirs()
-            self.status_var.set("Configuración guardada")
-            self.log("✅ Configuración guardada en .env")
-            self._refresh_queue_view()
+
+            self.setup_status.configure(text="✓ Configuración guardada.", text_color=self.GREEN)
+            self.log("✅ Configuración guardada desde la interfaz.")
+            self._refresh_cookie_status()
+
+            if self.running:
+                self.log("ℹ️  Los cambios de configuración se aplican al próximo reinicio del pipeline.")
         except Exception as exc:
-            messagebox.showerror(self.TITLE, f"No se pudo guardar el .env:\n{exc}")
+            messagebox.showerror(self.TITLE, f"No se pudo guardar:\n{exc}")
+
+    def ffmpeg_ui_to_env(self):
+        value = self.ffmpeg_menu.get() if hasattr(self, "ffmpeg_menu") else "Muy baja"
+        return {
+            "Normal": "normal",
+            "Baja": "below_normal",
+            "Muy baja": "idle",
+        }.get(value, "idle")
+
+    def _on_ffmpeg_menu_change(self, value):
+        self.ffmpeg_ui_value.set(value)
+        self.ffmpeg_var.set(f"{value} · {self.ffmpeg_ui_to_env()}")
+
+    def _toggle_api_visibility(self):
+        self.key_visible = not self.key_visible
+        self.api_entry.configure(show="" if self.key_visible else "*")
+
+    def _refresh_cookie_status(self):
+        try:
+            path = Path(self.entry_vars.get("TIKTOK_COOKIES_FILE", tk.StringVar()).get().strip())
+            if path.exists():
+                self.cookie_status.configure(
+                    text=f"✓ Cookies encontradas · {path}",
+                    text_color=self.GREEN,
+                )
+            else:
+                self.cookie_status.configure(
+                    text="⚠ No se encontró el archivo de cookies.",
+                    text_color=self.YELLOW,
+                )
+        except Exception:
+            pass
+
+    def _choose_cookie_file(self):
+        path = filedialog.askopenfilename(
+            title="Seleccionar cookies.txt",
+            filetypes=[
+                ("cookies.txt", "*.txt"),
+                ("Archivos de texto", "*.txt"),
+                ("Todos", "*.*"),
+            ],
+        )
+        if path:
+            self._ensure_var("TIKTOK_COOKIES_FILE").set(path)
+            self._refresh_cookie_status()
+
+    def _choose_directory(self, key):
+        current = self.entry_vars.get(key)
+        initial = current.get() if current else str(APP_DIR)
+        path = filedialog.askdirectory(
+            title=f"Seleccionar {key}",
+            initialdir=initial if Path(initial).exists() else str(APP_DIR),
+        )
+        if path:
+            self._ensure_var(key).set(path)
+
+    def _choose_file_for_key(self, key):
+        current = self.entry_vars.get(key)
+        initial = current.get() if current else str(APP_DIR)
+        initial_dir = str(Path(initial).parent) if Path(initial).parent.exists() else str(APP_DIR)
+        path = filedialog.askopenfilename(
+            title=f"Seleccionar {key}",
+            initialdir=initial_dir,
+        )
+        if path:
+            self._ensure_var(key).set(path)
+
+    def _open_url(self, url):
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            self.log(f"⚠️  No se pudo abrir el navegador: {exc}")
+
+    # --------------------------------------------------------
+    # Pipeline control
+    # --------------------------------------------------------
 
     def _install_output_redirect(self):
         global _GUI_OLD_STDOUT, _GUI_OLD_STDERR
@@ -3469,9 +4331,9 @@ class TikTokClipAutomationApp:
 
     def _restore_output_redirect(self):
         global _GUI_OLD_STDOUT, _GUI_OLD_STDERR
-        if '_GUI_OLD_STDOUT' in globals():
+        if "_GUI_OLD_STDOUT" in globals():
             sys.stdout = _GUI_OLD_STDOUT
-        if '_GUI_OLD_STDERR' in globals():
+        if "_GUI_OLD_STDERR" in globals():
             sys.stderr = _GUI_OLD_STDERR
 
     def log(self, message):
@@ -3490,19 +4352,32 @@ class TikTokClipAutomationApp:
                 self.log_text.see("end")
                 self.log_text.configure(state="disabled")
 
-        try:
-            self.root.after(100, self._drain_output_queue)
-        except tk.TclError:
-            pass
+            lower = chunk.lower()
+            if "descargando" in lower or "download" in lower:
+                self.stage_var.set("Descargando")
+            elif "facecam" in lower or "kimi" in lower or "diffusiongemma" in lower:
+                self.stage_var.set("Analizando facecam")
+            elif "whisper" in lower or "transcrib" in lower:
+                self.stage_var.set("Transcribiendo")
+            elif "omni" in lower:
+                self.stage_var.set("Seleccionando fragmento")
+            elif "renderizando" in lower or "ffmpeg" in lower:
+                self.stage_var.set("Renderizando")
+            elif "tiktok: subiendo" in lower:
+                self.stage_var.set("Publicando en TikTok")
+            elif "clip terminado" in lower or "publicado" in lower:
+                self.stage_var.set("Finalizado")
 
-    def _pipeline_processed(self, output_path: Path, clip: dict):
-        if not TIKTOK_AUTO_UPLOAD:
-            return
-        if self.tiktok_manager is None:
-            self.tiktok_manager = TikTokUploadManager(log_callback=self.log)
-            self.tiktok_manager.start()
-        self.tiktok_manager.enqueue(output_path, clip)
-        self.root.after(0, self._refresh_queue_view)
+            self.activity_var.set(chunk.strip()[-240:] or self.activity_var.get())
+            if hasattr(self, "activity_big"):
+                self.activity_big.configure(text=self.activity_var.get())
+            if hasattr(self, "pipeline_activity_label"):
+                self.pipeline_activity_label.configure(text=self.activity_var.get())
+
+        try:
+            self.root.after(120, self._drain_output_queue)
+        except Exception:
+            pass
 
     def start_pipeline(self):
         global PIPELINE_ON_PROCESSED
@@ -3515,13 +4390,18 @@ class TikTokClipAutomationApp:
             if not check_dependencies():
                 messagebox.showerror(
                     self.TITLE,
-                    "Faltan dependencias. Revisá el panel Logs.",
+                    "Faltan dependencias. Revisá Actividad para ver el detalle.",
                 )
                 return
 
             ensure_dirs()
+            problems = validate_runtime_config()
+            if problems:
+                self._show_config_problems(problems)
+                return
 
             self.stop_event.clear()
+
             self.tiktok_manager = TikTokUploadManager(log_callback=self.log)
             self.tiktok_manager.discover_existing_reels()
             self.tiktok_manager.start()
@@ -3535,19 +4415,32 @@ class TikTokClipAutomationApp:
             )
             self.watcher_thread.start()
 
-            self.watcher_var.set(
-                f"🟢 Watcher activo → /{KICK_CHANNEL} cada {KICK_POLL_SECONDS}s"
-            )
-            self.tiktok_var.set(
-                f"🟢 TikTok {'activo' if TIKTOK_AUTO_UPLOAD else 'desactivado'}"
-            )
+            self.running = True
+            self.start_time = time.time()
             self.status_var.set("Ejecutando")
+            self.header_status.configure(text="Ejecutando")
+            self.pipeline_status_label.configure(text="Ejecutando", text_color=self.GREEN)
+            self.watcher_var.set(f"Activo · /{KICK_CHANNEL}")
+            self.tiktok_var.set(
+                "Activo · publicación inmediata"
+                if TIKTOK_AUTO_UPLOAD
+                else "Desactivado"
+            )
             self.start_button.configure(state="disabled")
             self.stop_button.configure(state="normal")
-            self.log("🚀 Pipeline iniciado.")
+            self.activity_progress.start()
+            self.log("🚀 TTCA v0.2 iniciado.")
         except Exception as exc:
             self.log(f"❌ No se pudo iniciar el pipeline: {exc}")
             messagebox.showerror(self.TITLE, str(exc))
+
+    def _show_config_problems(self, problems):
+        text_value = "\n".join(f"• {p}" for p in problems)
+        messagebox.showwarning(
+            self.TITLE,
+            "Revisá esta configuración antes de iniciar:\n\n" + text_value,
+        )
+        self._show_page("setup")
 
     def _watcher_worker(self):
         try:
@@ -3560,19 +4453,38 @@ class TikTokClipAutomationApp:
         finally:
             self.root.after(0, self._pipeline_stopped_ui)
 
-    def _pipeline_stopped_ui(self):
-        self.watcher_var.set("🔴 Watcher detenido")
-        self.status_var.set("Detenido")
-        self.start_button.configure(state="normal")
-        self.stop_button.configure(state="disabled")
+    def _pipeline_processed(self, output_path: Path, clip: dict):
+        if not TIKTOK_AUTO_UPLOAD:
+            return
+        if self.tiktok_manager is None:
+            self.tiktok_manager = TikTokUploadManager(log_callback=self.log)
+            self.tiktok_manager.start()
+        self.tiktok_manager.enqueue(output_path, clip)
+        self.root.after(0, self._refresh_tiktok_queue)
 
     def stop_pipeline(self):
         self.stop_event.set()
         if self.tiktok_manager:
             self.tiktok_manager.stop()
-        self.watcher_var.set("🟡 Deteniendo watcher...")
-        self.tiktok_var.set("🟡 Deteniendo TikTok...")
-        self.log("⏹️  Deteniendo pipeline...")
+        self.watcher_var.set("Deteniendo…")
+        self.tiktok_var.set("Deteniendo…")
+        self.log("⏹️  Deteniendo pipeline…")
+
+    def _pipeline_stopped_ui(self):
+        self.running = False
+        self.status_var.set("Detenido")
+        self.header_status.configure(text="Detenido")
+        self.pipeline_status_label.configure(text="Detenido", text_color=self.RED)
+        self.start_button.configure(state="normal")
+        self.stop_button.configure(state="disabled")
+        self.activity_progress.stop()
+        self.watcher_var.set("Detenido")
+        self.tiktok_var.set("Detenido")
+        self.stage_var.set("Esperando")
+
+    # --------------------------------------------------------
+    # Existing clips / TikTok
+    # --------------------------------------------------------
 
     def process_existing_async(self):
         threading.Thread(
@@ -3600,7 +4512,7 @@ class TikTokClipAutomationApp:
         ):
             self.log(
                 "⚠️  Iniciá el pipeline antes: los clips existentes "
-                "usan la misma cola secuencial que el watcher."
+                "usan la misma cola secuencial."
             )
             return
 
@@ -3651,11 +4563,18 @@ class TikTokClipAutomationApp:
         self.log(
             f"📥 {queued_count} clip(s) existente(s) agregados a la cola secuencial."
         )
-        self.root.after(0, self._refresh_queue_view)
+        self.root.after(0, self._refresh_views)
 
-    def _refresh_queue_view(self):
-        if not hasattr(self, "queue_text"):
-            return
+    def retry_failed_tiktok(self):
+        if self.tiktok_manager is None:
+            self.tiktok_manager = TikTokUploadManager(log_callback=self.log)
+            self.tiktok_manager.start()
+        count = self.tiktok_manager.retry_failed()
+        self._refresh_tiktok_queue()
+        if count:
+            self.log(f"🔁 Se reintentará(n) {count} publicación(es) fallida(s).")
+
+    def _refresh_tiktok_queue(self):
         try:
             state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
             items = state.get("items", {})
@@ -3664,37 +4583,127 @@ class TikTokClipAutomationApp:
                 items.values(),
                 key=lambda x: x.get("created_at", 0),
                 reverse=True,
-            )[:50]:
-                status = item.get("status", "?")
+            )[:80]:
+                status = str(item.get("status", "?")).upper()
                 name = Path(item.get("video_path", "")).name
-                scheduled = item.get("scheduled_at")
-                if scheduled:
-                    try:
-                        when = datetime.fromtimestamp(float(scheduled)).strftime("%d/%m %H:%M")
-                    except Exception:
-                        when = "-"
-                else:
-                    when = "-"
-                lines.append(f"{status.upper():10} | {when:11} | {name}")
+                error = item.get("last_error")
+                suffix = f"  ·  {error[:70]}" if error else ""
+                lines.append(f"{status:10}  |  {name}{suffix}")
 
-            self.queue_text.configure(state="normal")
-            self.queue_text.delete("1.0", "end")
-            self.queue_text.insert("end", "\n".join(lines) or "Cola vacía.")
-            self.queue_text.configure(state="disabled")
+            self.tiktok_text.configure(state="normal")
+            self.tiktok_text.delete("1.0", "end")
+            self.tiktok_text.insert("end", "\n".join(lines) or "Cola vacía.")
+            self.tiktok_text.configure(state="disabled")
+        except Exception:
+            pass
+
+    # --------------------------------------------------------
+    # Live dashboard
+    # --------------------------------------------------------
+
+    def _refresh_views(self):
+        try:
+            dq = PIPELINE_DOWNLOAD_QUEUE.qsize() if PIPELINE_DOWNLOAD_QUEUE else 0
+            pq = PIPELINE_JOB_QUEUE.qsize() if PIPELINE_JOB_QUEUE else 0
+
+            self.download_queue_var.set(str(dq))
+            self.process_queue_var.set(str(pq))
+
+            state = PIPELINE_REGISTRY or {}
+            failed = sum(1 for item in state.values() if item.get("status") == "failed")
+            self.failed_var.set(str(failed))
+
+            tiktok_state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
+            t_items = tiktok_state.get("items", {})
+            t_pending = sum(
+                1 for item in t_items.values()
+                if item.get("status") in {"queued", "uploading"}
+            )
+            self.tiktok_queue_var.set(str(t_pending))
+
+            if self.running:
+                self.system_rows["watcher"].configure(text="● Activo", text_color=self.GREEN)
+                self.system_rows["download"].configure(
+                    text=f"{dq} pendientes",
+                    text_color=self.BLUE if dq else self.MUTED,
+                )
+                self.system_rows["processor"].configure(
+                    text=f"{pq} pendientes",
+                    text_color=self.YELLOW if pq else self.GREEN,
+                )
+                self.system_rows["tiktok"].configure(
+                    text="Publicación inmediata" if TIKTOK_AUTO_UPLOAD else "Desactivado",
+                    text_color=self.GREEN if TIKTOK_AUTO_UPLOAD else self.MUTED,
+                )
+            else:
+                self.system_rows["watcher"].configure(text="Detenido", text_color=self.RED)
+                self.system_rows["download"].configure(text="Detenido", text_color=self.MUTED)
+                self.system_rows["processor"].configure(text="Detenido", text_color=self.MUTED)
+                self.system_rows["tiktok"].configure(text="Detenido", text_color=self.MUTED)
+
+            self.system_rows["ffmpeg"].configure(
+                text=self.ffmpeg_var.get(),
+                text_color=self.GREEN if "idle" in self.ffmpeg_var.get().lower() else self.YELLOW,
+            )
+
+            self.tiktok_status_big.configure(
+                text="Activa · inmediata" if TIKTOK_AUTO_UPLOAD else "Desactivada",
+                text_color=self.GREEN if TIKTOK_AUTO_UPLOAD else self.RED,
+            )
+            self._refresh_tiktok_queue()
         except Exception:
             pass
 
         try:
-            self.root.after(3000, self._refresh_queue_view)
-        except tk.TclError:
+            self.root.after(1000, self._refresh_views)
+        except Exception:
             pass
+
+    def _tick_ui(self):
+        try:
+            if self.running:
+                elapsed = max(0, int(time.time() - (self.start_time or time.time())))
+                self.uptime_var.set(
+                    f"{elapsed//3600:02d}:{(elapsed%3600)//60:02d}:{elapsed%60:02d}"
+                )
+                self.activity_progress.start()
+
+                self.pulse = not self.pulse
+                self.status_dot.configure(
+                    text="●" if self.pulse else "◉",
+                    text_color=self.GREEN,
+                )
+                self.header_status.configure(text=self.status_var.get())
+                self.dashboard_stage.configure(text=self.stage_var.get())
+                self.ffmpeg_var.set(
+                    f"{self.ffmpeg_menu.get() if hasattr(self, 'ffmpeg_menu') else 'Muy baja'} · "
+                    f"{self.ffmpeg_ui_to_env()}"
+                )
+            else:
+                self.status_dot.configure(text="●", text_color=self.RED)
+                self.dashboard_stage.configure(text="Esperando")
+            self.root.after(700, self._tick_ui)
+        except Exception:
+            pass
+
+    def clear_logs(self):
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.configure(state="disabled")
 
     def on_close(self):
         self.stop_event.set()
         if self.tiktok_manager:
             self.tiktok_manager.stop()
-        self._restore_output_redirect()
-        self.root.destroy()
+        try:
+            self._restore_output_redirect()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
 
 
 def reload_config_from_env():
