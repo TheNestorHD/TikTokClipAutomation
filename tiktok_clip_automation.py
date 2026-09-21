@@ -1870,35 +1870,39 @@ def load_clip_registry() -> dict:
 
 def save_clip_registry(registry: dict):
     """Guarda el registro de forma atómica y limita su crecimiento."""
-    CLIP_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with PIPELINE_REGISTRY_LOCK:
+        CLIP_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    if len(registry) > REGISTRY_MAX_ENTRIES:
-        ordered = sorted(
-            registry.items(),
-            key=lambda item: float(item[1].get("last_seen_at", 0)),
-            reverse=True,
+        if len(registry) > REGISTRY_MAX_ENTRIES:
+            ordered = sorted(
+                registry.items(),
+                key=lambda item: float(item[1].get("last_seen_at", 0)),
+                reverse=True,
+            )
+            keep = dict(ordered[:REGISTRY_MAX_ENTRIES])
+            registry.clear()
+            registry.update(keep)
+
+        tmp_path = CLIP_REGISTRY_FILE.with_suffix(
+            CLIP_REGISTRY_FILE.suffix + ".tmp"
         )
-        keep = dict(ordered[:REGISTRY_MAX_ENTRIES])
-        registry.clear()
-        registry.update(keep)
-
-    tmp_path = CLIP_REGISTRY_FILE.with_suffix(CLIP_REGISTRY_FILE.suffix + ".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(registry, f, indent=2, ensure_ascii=False)
-    tmp_path.replace(CLIP_REGISTRY_FILE)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(registry, f, indent=2, ensure_ascii=False)
+        tmp_path.replace(CLIP_REGISTRY_FILE)
 
 
 def update_clip_registry(registry: dict, clip_id: str, **fields):
     # "clip_id" se guarda dentro del registro, pero no puede entrar dos veces
     # como argumento y como **fields.
-    fields = dict(fields)
-    fields.pop("clip_id", None)
+    with PIPELINE_REGISTRY_LOCK:
+        fields = dict(fields)
+        fields.pop("clip_id", None)
 
-    record = registry.setdefault(str(clip_id), {})
-    record.update(fields)
-    record["clip_id"] = str(clip_id)
-    record["last_seen_at"] = time.time()
-    save_clip_registry(registry)
+        record = registry.setdefault(str(clip_id), {})
+        record.update(fields)
+        record["clip_id"] = str(clip_id)
+        record["last_seen_at"] = time.time()
+        save_clip_registry(registry)
 
 
 def _clip_is_retryable(record: dict) -> bool:
