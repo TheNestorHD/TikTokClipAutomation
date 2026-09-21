@@ -65,7 +65,9 @@ def resolve_path(value: str | Path, default_relative: str = "") -> Path:
 # --- Rutas ---
 CLIPS_DIR = resolve_path(env_value("CLIPS_DIR", "data/clips"))
 OUTPUT_DIR = resolve_path(env_value("OUTPUT_DIR", "data/reels"))
-USED_DIR = resolve_path(env_value("USED_DIR", "data/used"))
+USED_DIR_RAW = env_value("USED_DIR", "data/used")
+USED_DIR = resolve_path(USED_DIR_RAW)
+RECYCLE_BIN_TOKEN = "__RECYCLE_BIN__"
 DIVIDER_PATH = resolve_path(env_value("DIVIDER_PATH", "assets/divider.png"))
 FONT_PATH = resolve_path(env_value("FONT_PATH", "assets/TF2 build.ttf"))
 CLIP_REGISTRY_FILE = resolve_path(env_value("CLIP_REGISTRY_FILE", "data/seen_clips.json"))
@@ -229,8 +231,11 @@ def check_dependencies(exit_on_error: bool = False):
 
 
 def ensure_dirs(strict: bool = False):
-    for path in (CLIPS_DIR, OUTPUT_DIR, USED_DIR):
+    for path in (CLIPS_DIR, OUTPUT_DIR):
         path.mkdir(parents=True, exist_ok=True)
+
+    if str(USED_DIR_RAW).strip() != RECYCLE_BIN_TOKEN:
+        USED_DIR.mkdir(parents=True, exist_ok=True)
 
     CLIP_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
     TIKTOK_UPLOAD_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
@@ -331,11 +336,15 @@ def detect_facecam_llm(video_path: Path, orig_w: int, orig_h: int, time_sec: flo
 
     prompt = (
         f"Kick stream screenshot {new_w}x{new_h}px.\n"
-        "Find the streamer's facecam/webcam overlay panel (picture-in-picture).\n"
-        "It is a rectangular box containing the streamer's face and its full visual frame.\n"
-        "IMPORTANT: Return a TIGHT bounding box that matches ONLY the panel itself.\n"
-        "Do NOT include gameplay background outside the panel border.\n"
-        "The box edges should align with the outer border of the facecam frame.\n"
+        "FIRST priority: find a real webcam/face camera feed (picture-in-picture) showing the streamer.\n"
+        "Always prefer a real webcam feed when one exists.\n"
+        "ONLY if no real webcam feed can be found, look for a VTuber avatar panel, whether 2D or 3D.\n"
+        "The VTuber avatar is a fallback representation of the streamer and should be selected only when the camera is absent.\n"
+        "The target is a rectangular box containing the complete camera image or complete avatar panel.\n"
+        "IMPORTANT: Return a TIGHT bounding box matching ONLY that camera/avatar panel.\n"
+        "Do NOT include gameplay background outside the panel.\n"
+        "Do NOT select chat, alerts, logos, donation boxes, decorative overlays, or unrelated UI elements.\n"
+        "The box edges should align with the outer border of the selected camera/avatar panel.\n"
         'Output ONLY JSON: {"x":N,"y":N,"width":N,"height":N}\n'
         "No other text."
     )
@@ -1522,8 +1531,14 @@ def build_ffmpeg_cmd(
 
 
 def move_to_used(video_path: Path) -> Path | None:
-    """Mueve el clip original a Usados y evita colisiones de nombres."""
+    """Mueve el clip original a la carpeta Usados o a la Papelera de reciclaje."""
     try:
+        if str(USED_DIR_RAW).strip() == RECYCLE_BIN_TOKEN:
+            from send2trash import send2trash
+            send2trash(str(video_path))
+            print(f"  🗑️  Original enviado a la Papelera: {video_path.name}")
+            return video_path
+
         USED_DIR.mkdir(parents=True, exist_ok=True)
         dest = USED_DIR / video_path.name
         if dest.exists():
@@ -1533,7 +1548,7 @@ def move_to_used(video_path: Path) -> Path | None:
         print(f"  📦 Original movido a: {dest}")
         return dest
     except Exception as e:
-        print(f"  ⚠️  No se pudo mover el original a Usados: {e}")
+        print(f"  ⚠️  No se pudo mover el original a destino de usados: {e}")
         return None
 
 
@@ -3615,7 +3630,13 @@ class TikTokClipAutomationApp:
         self._label(right, "TIEMPO ACTIVO", size=10, color=self.MUTED, bold=True).pack(
             anchor="w", pady=(18, 0)
         )
-        self._label(right, self.uptime_var, size=17, bold=True).pack(anchor="w", pady=(5, 0))
+        self.uptime_label = self._label(
+            right,
+            textvariable=self.uptime_var,
+            size=17,
+            bold=True,
+        )
+        self.uptime_label.pack(anchor="w", pady=(5, 0))
 
         stats = self.ctk.CTkFrame(parent, fg_color="transparent")
         stats.pack(fill="x", pady=(0, 15))
@@ -3761,7 +3782,7 @@ class TikTokClipAutomationApp:
             scroll,
             "3",
             "Cookies de TikTok",
-            "Exportá tus cookies en formato Netscape cookies.txt y seleccioná el archivo.",
+            "Exportá tus cookies en formato Netscape y seleccioná el archivo. Abajo tenés el paso a paso completo.",
             self._make_cookie_row,
             {},
         )
@@ -3931,6 +3952,31 @@ class TikTokClipAutomationApp:
         self.cookie_status = self._label(parent, "No comprobado.", size=10, color=self.MUTED)
         self.cookie_status.pack(anchor="w", pady=(7, 0))
 
+        guide = self._frame(parent, fg_color=self.CARD_ALT, corner_radius=10)
+        guide.pack(fill="x", pady=(10, 0))
+        self._label(
+            guide,
+            "Cómo obtener tiktok_cookies.txt",
+            size=11,
+            color=self.YELLOW,
+            bold=True,
+        ).pack(anchor="w", padx=12, pady=(10, 4))
+        self._label(
+            guide,
+            "1. Instalá la extensión Get cookies.txt LOCALLY.\n"
+            "2. Iniciá sesión normalmente en TikTok desde Chrome o Edge.\n"
+            "3. Abrí TikTok y comprobá que tu cuenta esté logueada.\n"
+            "4. Abrí la extensión estando en una página de TikTok.\n"
+            "5. Exportá las cookies del dominio de TikTok en formato cookies.txt/Netscape.\n"
+            "6. Guardá el archivo como tiktok_cookies.txt.\n"
+            "7. Volvé a TTCA y usá «Seleccionar» para elegirlo.\n"
+            "8. No compartas ese archivo: contiene información de sesión.",
+            size=10,
+            color=self.TEXT,
+            wraplength=820,
+            justify="left",
+        ).pack(anchor="w", padx=12, pady=(0, 10))
+
     def _make_performance_row(self, parent):
         row = self.ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x")
@@ -3964,10 +4010,20 @@ class TikTokClipAutomationApp:
         self.ffmpeg_menu.configure(command=self._on_ffmpeg_menu_change)
 
     def _make_paths_form(self, parent):
+        self._label(
+            parent,
+            "Divisor recomendado: PNG de exactamente 1080 × 160 píxeles (1080×160). "
+            "Si no se encuentra, TTCA elimina ese espacio y el gameplay ocupa toda la zona disponible.",
+            size=10,
+            color=self.YELLOW,
+            wraplength=820,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 8))
+
         fields = [
             ("CLIPS_DIR", "Clips"),
             ("OUTPUT_DIR", "Reels"),
-            ("USED_DIR", "Usados"),
+            ("USED_DIR", "Usados / Papelera"),
             ("DIVIDER_PATH", "Divisor"),
             ("FONT_PATH", "Fuente"),
             ("WHISPER_CPP_EXE", "Whisper CLI"),
@@ -3992,6 +4048,13 @@ class TikTokClipAutomationApp:
                 lambda k=key, cmd=command: cmd(k),
                 width=88,
             ).pack(side="left")
+            if key == "USED_DIR":
+                self._button(
+                    row,
+                    "Papelera",
+                    self._set_recycle_bin,
+                    width=88,
+                ).pack(side="left", padx=(6, 0))
 
     # --------------------------------------------------------
     # Pipeline
@@ -4290,6 +4353,14 @@ class TikTokClipAutomationApp:
         if path:
             self._ensure_var("TIKTOK_COOKIES_FILE").set(path)
             self._refresh_cookie_status()
+
+    def _set_recycle_bin(self):
+        self._ensure_var("USED_DIR").set(RECYCLE_BIN_TOKEN)
+        if hasattr(self, "setup_status"):
+            self.setup_status.configure(
+                text="✓ Los clips usados irán a la Papelera de reciclaje.",
+                text_color=self.GREEN,
+            )
 
     def _choose_directory(self, key):
         current = self.entry_vars.get(key)
@@ -4710,7 +4781,7 @@ def reload_config_from_env():
     # Releer el archivo por si fue editado fuera de la GUI.
     load_dotenv(ENV_FILE, override=True)
 
-    global CLIPS_DIR, OUTPUT_DIR, USED_DIR, DIVIDER_PATH, FONT_PATH, CLIP_REGISTRY_FILE
+    global CLIPS_DIR, OUTPUT_DIR, USED_DIR, USED_DIR_RAW, DIVIDER_PATH, FONT_PATH, CLIP_REGISTRY_FILE
     global TARGET_W, TARGET_H, DIVIDER_H
     global SUB_SIZE, SUB_Y_OFFSET, SUB_MAX_WORDS, SUB_COLOR, SUB_BORDER, SUB_BORDER_WIDTH
     global FACE_MAX_RETRIES_KIMI, FACE_FALLBACK_MODEL, FACE_KIMI_MODEL, FACE_KIMI_TIMEOUT, FACE_FALLBACK_TIMEOUT
@@ -4731,7 +4802,8 @@ def reload_config_from_env():
 
     CLIPS_DIR = resolve_path(env_value("CLIPS_DIR", "data/clips"))
     OUTPUT_DIR = resolve_path(env_value("OUTPUT_DIR", "data/reels"))
-    USED_DIR = resolve_path(env_value("USED_DIR", "data/used"))
+    USED_DIR_RAW = env_value("USED_DIR", "data/used")
+    USED_DIR = resolve_path(USED_DIR_RAW)
     DIVIDER_PATH = resolve_path(env_value("DIVIDER_PATH", "assets/divider.png"))
     FONT_PATH = resolve_path(env_value("FONT_PATH", "assets/TF2 build.ttf"))
     CLIP_REGISTRY_FILE = resolve_path(env_value("CLIP_REGISTRY_FILE", "data/seen_clips.json"))
