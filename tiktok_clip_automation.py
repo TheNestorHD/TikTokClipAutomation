@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -156,9 +156,16 @@ TIKTOK_MINIMIZED = env_bool("TIKTOK_MINIMIZED", True)
 TIKTOK_PROCESSING_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_PROCESSING_TIMEOUT_SECONDS", 180))
 TIKTOK_CONFIRM_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_CONFIRM_TIMEOUT_SECONDS", 90))
 TIKTOK_UPLOAD_CHECK_SECONDS = max(5, env_int("TIKTOK_UPLOAD_CHECK_SECONDS", 30))
+TIKTOK_CAPTION_MODE = env_value("TIKTOK_CAPTION_MODE", "template").strip().lower()
+if TIKTOK_CAPTION_MODE not in {"template", "omni"}:
+    TIKTOK_CAPTION_MODE = "template"
 TIKTOK_CAPTION_TEMPLATE = env_value(
     "TIKTOK_CAPTION_TEMPLATE",
-    "{title} #tiktok #kick",
+    "{title} {hashtags}",
+)
+TIKTOK_HASHTAGS = env_value(
+    "TIKTOK_HASHTAGS",
+    "#tiktok #kick",
 )
 TIKTOK_UPLOAD_REGISTRY = resolve_path(
     env_value("TIKTOK_UPLOAD_REGISTRY", "data/tiktok_uploads.json")
@@ -525,28 +532,47 @@ def _make_trim_proxy(video_path: Path, duration: float) -> tuple[Path, float, fl
     return None
 
 
-def suggest_trim_omni_video(video_path: Path, duration: float, max_retries: int = 5) -> tuple[float, float] | None:
+def suggest_trim_omni_video(
+    video_path: Path,
+    duration: float,
+    clip_title: str = "",
+    max_retries: int = 5,
+) -> dict | None:
     """
-    Auto-trim con Nemotron Omni viendo un proxy de 720p a 1 FPS.
+    Auto-trim con Nemotron Omni usando un proxy de 720p a 1 FPS.
     Para clips >120 s, el proxy corresponde a los últimos 120 s del original.
+    En modo IA también genera la descripción + hashtags usando el mismo análisis.
     """
     import base64
     import re
     import requests
 
-    print("  🤖 Auto-trim con Nemotron Omni (video)...")
+    print("  🤖 Auto-trim + contexto con Nemotron Omni (video)...")
     proxy_data = _make_trim_proxy(video_path, duration)
     if proxy_data is None:
         return None
 
     proxy, source_offset, proxy_duration = proxy_data
+    title_for_prompt = (clip_title or video_path.stem or "Nuevo clip").strip()
 
     try:
         b64 = base64.b64encode(proxy.read_bytes()).decode("utf-8")
         data_url = f"data:video/mp4;base64,{b64}"
 
+        caption_rules = ""
+        if TIKTOK_CAPTION_MODE == "omni":
+            caption_rules = """
+ADEMÁS, generá una descripción para TikTok basándote en lo que ocurre en el clip y en su título.
+- Debe sonar natural, breve y atractiva para un Reel.
+- Conservá el tono rioplatense/humorístico del streamer cuando corresponda.
+- Incluí 3 a 6 hashtags relevantes.
+- La descripción completa (texto + hashtags) no debe superar 220 caracteres.
+"""
         prompt = f"""Sos editor de Reels virales del streamer argentino "Eskrotos" (Kick).
 Estilo: humor absurdo, reacciones exageradas, sarcasmo, fallos épicos, punchlines.
+
+TÍTULO ORIGINAL DEL CLIP EN KICK:
+"{title_for_prompt}"
 
 Estás VIENDO un proxy de 720p a 1 FPS.
 El proxy representa desde {source_offset:.1f}s hasta {source_offset + proxy_duration:.1f}s del clip original.
@@ -564,10 +590,15 @@ REGLAS DE DURACIÓN:
   * 2–5s DESPUÉS
 - Si el mejor momento necesita más de 20s, devolvé el tramo largo.
 - Los tiempos que devuelvas deben ser RELATIVOS AL PROXY, no al original.
+__CAPTION_RULES__
 
 Respondé SOLO este JSON:
-{{"start": 10.0, "end": 28.0, "reason": "motivo corto"}}
+{{"start": 10.0, "end": 28.0, "reason": "motivo corto", "caption": "descripción con hashtags"}}
+
+Cuando TIKTOK_CAPTION_MODE no sea "omni", "caption" puede ser una cadena vacía.
+No agregues Markdown ni texto fuera del JSON.
 """
+        prompt = prompt.replace("__CAPTION_RULES__", caption_rules)
 
         headers = {
             "Authorization": f"Bearer {NVIDIA_API_KEY}",
@@ -583,7 +614,7 @@ Respondé SOLO este JSON:
                     {"type": "text", "text": prompt},
                 ],
             }],
-            "max_tokens": 300,
+            "max_tokens": 420 if TIKTOK_CAPTION_MODE == "omni" else 300,
             "temperature": 0.2,
             "stream": False,
         }
@@ -647,11 +678,31 @@ Respondé SOLO este JSON:
                     if end - start < min_len:
                         end = min(duration, start + min_len)
 
-                reason = obj.get("reason", "")
-                print(f"  ✅ Omni (video): {start:.1f}s → {end:.1f}s ({end-start:.1f}s)")
+                reason = str(obj.get("reason") or "").strip()
+                caption = " ".join(
+                    str(obj.get("caption") or "").replace("\n", " ").split()
+                )
+                if len(caption) > 220:
+                    caption = caption[:220].rstrip()
+
+                print(
+                    f"  ✅ Omni (video): {start:.1f}s → {end:.1f}s "
+                    f"({end-start:.1f}s)"
+                )
                 if reason:
                     print(f"     Motivo: {reason}")
-                return (start, end)
+                if TIKTOK_CAPTION_MODE == "omni":
+                    if caption:
+                        print(f"     📝 Descripción IA: {caption}")
+                    else:
+                        print("     ⚠️  Omni no devolvió descripción; se usará la plantilla.")
+
+                return {
+                    "start": start,
+                    "end": end,
+                    "caption": caption if TIKTOK_CAPTION_MODE == "omni" else "",
+                    "reason": reason,
+                }
 
             except requests.exceptions.Timeout:
                 wait = min(30, 5 * attempt)
@@ -671,11 +722,18 @@ Respondé SOLO este JSON:
         except Exception:
             pass
 
-
-def suggest_trim_llm(duration: float, video_path: Path | None = None) -> tuple[float, float] | None:
-    """Punto de entrada al auto-trim; actualmente usa únicamente Nemotron Omni."""
+def suggest_trim_llm(
+    duration: float,
+    video_path: Path | None = None,
+    clip_title: str = "",
+) -> dict | None:
+    """Punto de entrada al auto-trim; usa Nemotron Omni para trim y contexto."""
     if video_path is not None and video_path.exists():
-        return suggest_trim_omni_video(video_path, duration)
+        return suggest_trim_omni_video(
+            video_path,
+            duration,
+            clip_title=clip_title,
+        )
 
     print("  ⚠️  Sin video para Omni; no se sugiere trim automático.")
     return None
@@ -1562,7 +1620,11 @@ def move_to_used(video_path: Path) -> Path | None:
         return None
 
 
-def process_one_clip(video_path: Path, interactive: bool = True):
+def process_one_clip(
+    video_path: Path,
+    interactive: bool = True,
+    clip_metadata: dict | None = None,
+):
     """
     Procesa un solo clip de principio a fin.
     """
@@ -1670,10 +1732,28 @@ def process_one_clip(video_path: Path, interactive: bool = True):
     # ---- 3. Trim (auto Omni + opcional ajuste manual) ----
     start_sec = 0.0
     end_sec = duration
+    generated_caption = ""
 
-    suggested = suggest_trim_llm(duration, video_path=video_path)
+    clip_title = (
+        (clip_metadata or {}).get("title")
+        or video_path.stem
+        or "Nuevo clip"
+    )
+    suggested = suggest_trim_llm(
+        duration,
+        video_path=video_path,
+        clip_title=clip_title,
+    )
     if suggested:
-        start_sec, end_sec = suggested
+        start_sec = float(suggested["start"])
+        end_sec = float(suggested["end"])
+        generated_caption = str(suggested.get("caption") or "").strip()
+
+    if clip_metadata is not None:
+        clip_metadata["generated_caption"] = generated_caption
+        clip_metadata["caption_source"] = (
+            "omni" if generated_caption else "template"
+        )
 
     if interactive:
         if suggested:
@@ -2281,7 +2361,11 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     f"{job.get('title') or path.name}"
                 )
 
-                ok = process_one_clip(path, interactive=False)
+                ok = process_one_clip(
+                    path,
+                    interactive=False,
+                    clip_metadata=job,
+                )
 
                 if ok:
                     output_path = OUTPUT_DIR / f"reel_{path.stem}.mp4"
@@ -2708,7 +2792,6 @@ def cerrar_popups(page):
         'button:has-text("Close")',
         'button:has-text("Accept")',
         'button:has-text("Continue")',
-        'button:has-text("Post now")',
         'button:has-text("Skip")',
         'button:has-text("Next")',
         'button:has-text("Done")',
@@ -2763,8 +2846,12 @@ def manejar_dialogo_salida(page):
 
 
 
-def subir_video(ruta_video: Path, caption: str) -> bool:
-    """Intenta publicar un Reel en TikTok Studio usando Playwright."""
+def subir_video(
+    ruta_video: Path,
+    caption: str,
+    save_draft: bool = False,
+) -> bool:
+    """Sube un Reel en TikTok Studio y lo publica o guarda como borrador."""
     for intento in range(1, TIKTOK_UPLOAD_RETRIES + 1):
         if intento > 1:
             if TIKTOK_UPLOAD_RETRY_DELAY_SECONDS > 0:
@@ -2778,10 +2865,19 @@ def subir_video(ruta_video: Path, caption: str) -> bool:
                     f"\n↻ Reintento {intento}/{TIKTOK_UPLOAD_RETRIES} inmediato..."
                 )
 
-        if _subir_video_intento(ruta_video, caption, intento):
+        if _subir_video_intento(
+            ruta_video,
+            caption,
+            intento,
+            save_draft=save_draft,
+        ):
             return True
 
-    print(f"✗ Falló después de {TIKTOK_UPLOAD_RETRIES} intentos.")
+    resultado = "borrador" if save_draft else "publicación"
+    print(
+        f"✗ Falló después de {TIKTOK_UPLOAD_RETRIES} intentos "
+        f"({resultado})."
+    )
     return False
 
 
@@ -2789,6 +2885,7 @@ def _subir_video_intento(
     ruta_video: Path,
     caption: str,
     intento: int = 1,
+    save_draft: bool = False,
 ) -> bool:
     global sync_playwright
 
@@ -2796,19 +2893,18 @@ def _subir_video_intento(
         from playwright.sync_api import sync_playwright as _sync_playwright
         sync_playwright = _sync_playwright
 
+    action_label = "guardando borrador" if save_draft else "publicando"
     print(
         f"\n[{datetime.now().strftime('%H:%M:%S')}] "
-        f"Subiendo (intento {intento}): {ruta_video.name}"
+        f"{action_label.capitalize()} (intento {intento}): {ruta_video.name}"
     )
-    print(f"Caption: {caption[:80]}{'...' if len(caption) > 80 else ''}")
+    print(f"Caption: {caption[:120]}{'...' if len(caption) > 120 else ''}")
 
     browser = None
     with sync_playwright() as p:
         browser_args = ["--disable-blink-features=AutomationControlled"]
 
         if not TIKTOK_HEADLESS and TIKTOK_MINIMIZED:
-            # Chromium suele ignorar --start-minimized en Playwright.
-            # Sacamos la ventana del área visible en modo no-headless.
             browser_args.append("--window-position=-32000,-32000")
 
         browser = p.chromium.launch(
@@ -2832,9 +2928,7 @@ def _subir_video_intento(
                 )
 
             if not ruta_video.exists():
-                raise FileNotFoundError(
-                    f"No existe el video: {ruta_video}"
-                )
+                raise FileNotFoundError(f"No existe el video: {ruta_video}")
 
             cargar_cookies(context, TIKTOK_COOKIES_FILE)
             page = context.new_page()
@@ -2855,7 +2949,7 @@ def _subir_video_intento(
             file_input.set_input_files(str(ruta_video))
             time.sleep(2)
 
-            print("→ Esperando a que el video se procese (Post habilitado)...")
+            print("→ Esperando a que el video se procese...")
             procesado = False
             deadline = time.time() + TIKTOK_PROCESSING_TIMEOUT_SECONDS
 
@@ -2863,7 +2957,9 @@ def _subir_video_intento(
                 try:
                     btn = page.locator(
                         'button[data-e2e="post_video_button"], '
-                        'button:has-text("Post")'
+                        'button:has-text("Post"), '
+                        'button:has-text("Save draft"), '
+                        'button:has-text("Guardar borrador")'
                     ).first
 
                     if btn.is_visible(timeout=800):
@@ -2892,7 +2988,7 @@ def _subir_video_intento(
                 page.screenshot(path="error_procesamiento.png")
                 return False
 
-            print("→ Video procesado, botón Post habilitado")
+            print("→ Video procesado, control de publicación habilitado")
             time.sleep(1.5)
             cerrar_popups(page)
 
@@ -2907,6 +3003,90 @@ def _subir_video_intento(
             desc.type(caption, delay=20)
             time.sleep(1.2)
             cerrar_popups(page)
+
+            if save_draft:
+                print("→ Buscando botón Guardar borrador...")
+
+                draft_selectors = [
+                    'button:has-text("Save draft")',
+                    'button:has-text("Save Draft")',
+                    'button:has-text("Guardar borrador")',
+                    'div[role="button"]:has-text("Save draft")',
+                    'div[role="button"]:has-text("Guardar borrador")',
+                ]
+
+                clicked = False
+                for sel in draft_selectors:
+                    try:
+                        btn = page.locator(sel).first
+                        if btn.count() > 0 and btn.is_visible(timeout=2500):
+                            disabled = (
+                                btn.get_attribute("disabled")
+                                or btn.get_attribute("aria-disabled")
+                            )
+                            clases = (btn.get_attribute("class") or "").lower()
+                            if disabled in ["true", "True", True] or "disabled" in clases:
+                                continue
+
+                            btn.scroll_into_view_if_needed()
+                            time.sleep(0.5)
+                            try:
+                                btn.click(timeout=5000)
+                            except Exception:
+                                btn.evaluate("el => el.click()")
+
+                            print(f"  → Click correcto en Guardar borrador: {sel}")
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
+
+                if not clicked:
+                    print("✗ No se encontró el botón Guardar borrador")
+                    page.screenshot(path="error_no_save_draft_button.png")
+                    return False
+
+                print(
+                    f"→ Esperando confirmación del borrador "
+                    f"(hasta {TIKTOK_CONFIRM_TIMEOUT_SECONDS}s)..."
+                )
+
+                guardado = False
+                deadline = time.time() + TIKTOK_CONFIRM_TIMEOUT_SECONDS
+
+                while time.time() < deadline:
+                    content = page.content().lower()
+                    url = page.url.lower()
+
+                    exito = any([
+                        "saved to drafts" in content,
+                        "saved as draft" in content,
+                        "draft saved" in content,
+                        "saved in drafts" in content,
+                        "guardado en borradores" in content,
+                        "borrador guardado" in content,
+                        "/draft" in url,
+                    ])
+
+                    fallo = any([
+                        "something went wrong" in content,
+                        "try again" in content,
+                        "failed" in content and "upload" in content,
+                    ])
+
+                    if exito and not fallo:
+                        guardado = True
+                        break
+
+                    time.sleep(2)
+
+                if guardado:
+                    print("✓ Borrador guardado correctamente")
+                    return True
+
+                print("✗ No se confirmó el guardado del borrador")
+                page.screenshot(path="error_save_draft_failed.png")
+                return False
 
             print("→ Buscando botón Publicar...")
 
@@ -2991,7 +3171,7 @@ def _subir_video_intento(
                         '//button[contains(translate(translate(., '
                         '"ABCDEFGHIJKLMNOPQRSTUVWXYZ", '
                         '"abcdefghijklmnopqrstuvwxyz"), "POST NOW", '
-                        '"post now"), "post now")]'
+                        '"post now")]'
                     ),
                 ]:
                     try:
@@ -3038,9 +3218,7 @@ def _subir_video_intento(
                                 except Exception:
                                     btn.evaluate("el => el.click()")
 
-                                print(
-                                    f"  → Re-click en Post: {sel[:40]}"
-                                )
+                                print(f"  → Re-click en Post: {sel[:40]}")
                                 break
                         except Exception:
                             continue
@@ -3051,7 +3229,7 @@ def _subir_video_intento(
                 time.sleep(2)
 
             if publicado:
-                print("✓ Subido correctamente")
+                print("✓ Publicado correctamente")
                 return True
 
             print("✗ No se confirmó la publicación")
@@ -3069,6 +3247,7 @@ def _subir_video_intento(
         finally:
             if browser is not None:
                 browser.close()
+
 
 
 # ============================================================
@@ -3093,13 +3272,35 @@ def guardar_json(path: Path, data):
 
 def _caption_for_clip(clip: dict) -> str:
     title = (clip.get("title") or "Nuevo clip").strip()
+
+    if TIKTOK_CAPTION_MODE == "omni":
+        generated = (clip.get("generated_caption") or "").strip()
+        if generated:
+            return " ".join(generated.replace("\n", " ").split())
+
+    hashtags = " ".join(
+        part
+        for part in str(TIKTOK_HASHTAGS or "").split()
+        if part.startswith("#")
+    ).strip()
+
     try:
-        return TIKTOK_CAPTION_TEMPLATE.format(title=title)
+        caption = TIKTOK_CAPTION_TEMPLATE.format(
+            title=title,
+            hashtags=hashtags,
+        ).strip()
     except Exception:
-        return title
+        caption = title
+
+    if "{hashtags}" not in TIKTOK_CAPTION_TEMPLATE and hashtags:
+        if not any(token.startswith("#") for token in caption.split()):
+            caption = f"{caption} {hashtags}".strip()
+
+    return caption
+
 
 class TikTokUploadManager:
-    """Publica cada Reel inmediatamente, sin horarios ni límites artificiales."""
+    """Sube cada Reel inmediatamente: publica o guarda borrador según la configuración."""
 
     def __init__(self, log_callback=None):
         self.log_callback = log_callback or (lambda msg: print(msg))
@@ -3127,14 +3328,27 @@ class TikTokUploadManager:
         key = str(video_path.resolve())
 
         existing = items.get(key)
-        if existing and existing.get("status") in {"uploaded", "queued", "uploading"}:
+        if existing and existing.get("status") in {
+            "uploaded",
+            "draft_saved",
+            "queued",
+            "uploading",
+        }:
             return False
 
-        title = (clip or {}).get("title") or video_path.stem
+        clip_data = clip or {"title": video_path.stem}
+        title = clip_data.get("title") or video_path.stem
         items[key] = {
             "video_path": key,
             "title": title,
-            "caption": _caption_for_clip(clip or {"title": title}),
+            "caption": _caption_for_clip(clip_data),
+            "caption_source": (
+                "omni"
+                if TIKTOK_CAPTION_MODE == "omni"
+                and clip_data.get("generated_caption")
+                else "template"
+            ),
+            "publish_mode": "publish" if TIKTOK_AUTO_UPLOAD else "draft",
             "status": "queued",
             "created_at": time.time(),
             "scheduled_at": None,
@@ -3142,13 +3356,13 @@ class TikTokUploadManager:
             "retry_count": 0,
         }
         self.save_state(state)
-        self.log(f"📤 TikTok: agregado → {video_path.name}")
+
+        mode = "publicar" if TIKTOK_AUTO_UPLOAD else "guardar en borradores"
+        self.log(f"📤 TikTok: agregado para {mode} → {video_path.name}")
         self.wake_event.set()
         return True
 
     def discover_existing_reels(self):
-        if not TIKTOK_AUTO_UPLOAD:
-            return
         for video_path in sorted(OUTPUT_DIR.glob("*.mp4")):
             self.enqueue(video_path, {"title": video_path.stem})
 
@@ -3156,11 +3370,15 @@ class TikTokUploadManager:
         state = self.load_state()
         changed = 0
         for item in state.setdefault("items", {}).values():
-            if item.get("status") == "failed" and Path(item.get("video_path", "")).exists():
+            if (
+                item.get("status") == "failed"
+                and Path(item.get("video_path", "")).exists()
+            ):
                 item["status"] = "queued"
                 item["scheduled_at"] = None
                 item["last_error"] = None
                 item["retry_count"] = int(item.get("retry_count", 0)) + 1
+                item["publish_mode"] = "publish" if TIKTOK_AUTO_UPLOAD else "draft"
                 changed += 1
         if changed:
             self.save_state(state)
@@ -3179,7 +3397,13 @@ class TikTokUploadManager:
             daemon=True,
         )
         self.thread.start()
-        self.log("✅ TikTok automático iniciado: publicación inmediata.")
+
+        mode = (
+            "publicación inmediata"
+            if TIKTOK_AUTO_UPLOAD
+            else "subida automática a borradores"
+        )
+        self.log(f"✅ TikTok iniciado: {mode}.")
 
     def stop(self):
         self.stop_event.set()
@@ -3190,14 +3414,11 @@ class TikTokUploadManager:
 
     def _worker(self):
         while not self.stop_event.is_set():
-            if not TIKTOK_AUTO_UPLOAD:
-                self.stop_event.wait(TIKTOK_UPLOAD_CHECK_SECONDS)
-                continue
-
             state = self.load_state()
             items = state.setdefault("items", {})
             pending = [
-                item for item in items.values()
+                item
+                for item in items.values()
                 if item.get("status") == "queued"
                 and Path(item.get("video_path", "")).exists()
             ]
@@ -3210,14 +3431,25 @@ class TikTokUploadManager:
 
             item = pending[0]
             video_path = Path(item["video_path"])
+            publish_mode = item.get(
+                "publish_mode",
+                "publish" if TIKTOK_AUTO_UPLOAD else "draft",
+            )
+            save_draft = publish_mode == "draft"
+
             item["status"] = "uploading"
             item["last_error"] = None
             self.save_state(state)
 
-            self.log(f"🚀 TikTok: subiendo → {video_path.name}")
+            action = "guardando borrador" if save_draft else "publicando"
+            self.log(f"🚀 TikTok: {action} → {video_path.name}")
 
             try:
-                success = subir_video(video_path, item.get("caption", ""))
+                success = subir_video(
+                    video_path,
+                    item.get("caption", ""),
+                    save_draft=save_draft,
+                )
             except Exception as exc:
                 success = False
                 item["last_error"] = str(exc)
@@ -3225,25 +3457,33 @@ class TikTokUploadManager:
 
             if success:
                 now = datetime.now()
-                item["status"] = "uploaded"
+                item["status"] = "draft_saved" if save_draft else "uploaded"
                 item["uploaded_date"] = now.strftime("%Y-%m-%d")
                 item["uploaded_at"] = now.isoformat()
                 item["uploaded_timestamp"] = time.time()
                 item["last_error"] = None
                 item["scheduled_at"] = None
                 self.save_state(state)
-                self.log(f"✅ TikTok: publicado → {video_path.name}")
+                result_text = "guardado en borradores" if save_draft else "publicado"
+                self.log(f"✅ TikTok: {result_text} → {video_path.name}")
             else:
                 item["status"] = "failed"
                 item["scheduled_at"] = None
                 item["retry_count"] = int(item.get("retry_count", 0)) + 1
                 if not item.get("last_error"):
-                    item["last_error"] = "La publicación no pudo confirmarse."
+                    item["last_error"] = (
+                        "El borrador no pudo confirmarse."
+                        if save_draft
+                        else "La publicación no pudo confirmarse."
+                    )
                 self.save_state(state)
+                action_text = "guardar el borrador" if save_draft else "la publicación"
                 self.log(
-                    f"❌ TikTok: falló {video_path.name}. "
+                    f"❌ TikTok: falló {video_path.name} al {action_text}. "
                     "Queda en FALLIDO hasta reintentar desde la interfaz."
                 )
+
+
 
 # ============================================================
 # GUI
