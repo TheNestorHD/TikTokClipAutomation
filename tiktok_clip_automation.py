@@ -1097,16 +1097,20 @@ def preview_layout(video_path: Path, facecam_box, orig_w, orig_h, cam_h: int = N
         cam_h = max(280, min(cam_h, 720))
     cam_resized = cv2.resize(cam, (TARGET_W, cam_h), interpolation=cv2.INTER_AREA)
 
-    # Divider
-    divider = cv2.imread(str(DIVIDER_PATH))
-    if divider is None:
-        divider = np.zeros((DIVIDER_H, TARGET_W, 3), dtype=np.uint8)
-        divider[:] = (0, 180, 0)  # verde de emergencia
-    else:
-        divider = cv2.resize(divider, (TARGET_W, DIVIDER_H))
+    # Divider opcional
+    has_divider = DIVIDER_PATH.exists()
+    effective_divider_h = DIVIDER_H if has_divider else 0
+    divider = None
+    if has_divider:
+        divider = cv2.imread(str(DIVIDER_PATH))
+        if divider is not None:
+            divider = cv2.resize(divider, (TARGET_W, DIVIDER_H))
+        else:
+            has_divider = False
+            effective_divider_h = 0
 
     # Gameplay centrado
-    bottom_h = TARGET_H - cam_h - DIVIDER_H
+    bottom_h = TARGET_H - cam_h - effective_divider_h
     # Crop central del frame original
     aspect_bottom = TARGET_W / bottom_h
     if orig_w / orig_h > aspect_bottom:
@@ -1122,7 +1126,10 @@ def preview_layout(video_path: Path, facecam_box, orig_w, orig_h, cam_h: int = N
     game_resized = cv2.resize(game, (TARGET_W, bottom_h), interpolation=cv2.INTER_AREA)
 
     # Stack
-    preview = np.vstack([cam_resized, divider, game_resized])
+    if has_divider and divider is not None:
+        preview = np.vstack([cam_resized, divider, game_resized])
+    else:
+        preview = np.vstack([cam_resized, game_resized])
 
     # Redimensionar para que entre en pantalla
     scale = min(1.0, 900 / preview.shape[0])
@@ -5187,7 +5194,7 @@ class TikTokClipAutomationApp:
                 )
                 self.system_rows["tiktok"].configure(
                     text="Publicación inmediata" if TIKTOK_AUTO_UPLOAD else "Borradores automáticos",
-                    text_color=self.GREEN if TIKTOK_AUTO_UPLOAD else self.MUTED,
+                    text_color=self.GREEN,
                 )
             else:
                 self.system_rows["watcher"].configure(text="Detenido", text_color=self.RED)
@@ -5202,7 +5209,7 @@ class TikTokClipAutomationApp:
 
             self.tiktok_status_big.configure(
                 text="Activa · inmediata" if TIKTOK_AUTO_UPLOAD else "Activa · borradores",
-                text_color=self.GREEN if TIKTOK_AUTO_UPLOAD else self.RED,
+                text_color=self.GREEN,
             )
             self._refresh_tiktok_queue()
         except Exception:
