@@ -3100,8 +3100,6 @@ class TikTokUploadManager:
                 item["scheduled_at"] = target.timestamp()
                 item["status"] = "queued"
                 self.save_state(state)
-
-                item["scheduled_at"] = target.timestamp()
             delay = (target - datetime.now()).total_seconds()
             if delay > 0:
                 self.log(
@@ -3196,6 +3194,12 @@ class TikTokClipAutomationApp:
         "Fin TikTok": "TIKTOK_UPLOAD_END_HOUR",
         "Máx. TikTok/día": "TIKTOK_MAX_PER_DAY",
         "Variación TikTok (min)": "TIKTOK_VARIATION_MINUTES",
+        "Intervalo entre TikToks (min)": "TIKTOK_UPLOAD_INTERVAL_MINUTES",
+        "Reintentos TikTok": "TIKTOK_UPLOAD_RETRIES",
+        "Espera entre reintentos TikTok (s)": "TIKTOK_UPLOAD_RETRY_DELAY_SECONDS",
+        "TikTok ventana visible minimizada (true/false)": "TIKTOK_MINIMIZED",
+        "Tiempo máx. procesamiento TikTok (s)": "TIKTOK_PROCESSING_TIMEOUT_SECONDS",
+        "Tiempo máx. confirmación TikTok (s)": "TIKTOK_CONFIRM_TIMEOUT_SECONDS",
         "Caption": "TIKTOK_CAPTION_TEMPLATE",
     }
 
@@ -3635,7 +3639,10 @@ def reload_config_from_env():
     global FAILED_RETRY_SECONDS, REGISTRY_MAX_ENTRIES, SKIP_EXISTING_OUTPUT, MIN_VALID_OUTPUT_BYTES
     global TIKTOK_COOKIES_FILE, TIKTOK_HEADLESS, TIKTOK_AUTO_UPLOAD
     global TIKTOK_UPLOAD_START_HOUR, TIKTOK_UPLOAD_END_HOUR, TIKTOK_MAX_PER_DAY
-    global TIKTOK_VARIATION_MINUTES, TIKTOK_UPLOAD_CHECK_SECONDS
+    global TIKTOK_VARIATION_MINUTES, TIKTOK_UPLOAD_INTERVAL_MINUTES
+    global TIKTOK_UPLOAD_RETRIES, TIKTOK_UPLOAD_RETRY_DELAY_SECONDS, TIKTOK_MINIMIZED
+    global TIKTOK_PROCESSING_TIMEOUT_SECONDS, TIKTOK_CONFIRM_TIMEOUT_SECONDS
+    global TIKTOK_UPLOAD_CHECK_SECONDS
     global TIKTOK_CAPTION_TEMPLATE, TIKTOK_UPLOAD_REGISTRY
 
     CLIPS_DIR = resolve_path(env_value("CLIPS_DIR", "data/clips"))
@@ -3715,6 +3722,12 @@ def reload_config_from_env():
     TIKTOK_UPLOAD_END_HOUR = env_int("TIKTOK_UPLOAD_END_HOUR", 21)
     TIKTOK_MAX_PER_DAY = env_int("TIKTOK_MAX_PER_DAY", 10)
     TIKTOK_VARIATION_MINUTES = env_int("TIKTOK_VARIATION_MINUTES", 5)
+    TIKTOK_UPLOAD_INTERVAL_MINUTES = max(0, env_int("TIKTOK_UPLOAD_INTERVAL_MINUTES", 60))
+    TIKTOK_UPLOAD_RETRIES = max(1, env_int("TIKTOK_UPLOAD_RETRIES", 3))
+    TIKTOK_UPLOAD_RETRY_DELAY_SECONDS = max(5, env_int("TIKTOK_UPLOAD_RETRY_DELAY_SECONDS", 60))
+    TIKTOK_MINIMIZED = env_bool("TIKTOK_MINIMIZED", True)
+    TIKTOK_PROCESSING_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_PROCESSING_TIMEOUT_SECONDS", 180))
+    TIKTOK_CONFIRM_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_CONFIRM_TIMEOUT_SECONDS", 90))
     TIKTOK_UPLOAD_CHECK_SECONDS = max(5, env_int("TIKTOK_UPLOAD_CHECK_SECONDS", 30))
     TIKTOK_CAPTION_TEMPLATE = env_value(
         "TIKTOK_CAPTION_TEMPLATE",
