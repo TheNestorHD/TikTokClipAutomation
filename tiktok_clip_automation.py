@@ -2172,8 +2172,11 @@ def watch_kick_clips(stop_event=None, on_processed=None):
     if stop_event is None:
         stop_event = threading.Event()
 
+    global PIPELINE_JOB_QUEUE, PIPELINE_PROCESSING_THREAD, PIPELINE_REGISTRY
     job_queue = queue.Queue()
+    PIPELINE_JOB_QUEUE = job_queue
     registry = load_clip_registry()
+    PIPELINE_REGISTRY = registry
     print(f"  Registros conocidos: {len(registry)}")
 
     def processing_worker():
@@ -2282,6 +2285,18 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                 print(f"  ❌ Error procesando {clip_id}: {e}")
             finally:
                 job_queue.task_done()
+
+            if (
+                PROCESS_QUEUE_COOLDOWN_SECONDS > 0
+                and not stop_event.is_set()
+                and not job_queue.empty()
+            ):
+                print(
+                    f"  💤 Cooldown de cola: {PROCESS_QUEUE_COOLDOWN_SECONDS}s "
+                    "antes del siguiente clip..."
+                )
+                if stop_event.wait(PROCESS_QUEUE_COOLDOWN_SECONDS):
+                    break
 
     worker_thread = threading.Thread(
         target=processing_worker,
@@ -2439,7 +2454,10 @@ def watch_kick_clips(stop_event=None, on_processed=None):
             if stop_event.wait(KICK_ERROR_BACKOFF_SECONDS):
                 break
 
-    print("\n⏹️  Watcher detenido. Los trabajos pendientes quedan registrados para reintento.")
+    print("\n⏹️  Watcher detenido. La cola y los trabajos pendientes quedan registrados para reintento.")
+    PIPELINE_JOB_QUEUE = None
+    PIPELINE_PROCESSING_THREAD = None
+    PIPELINE_REGISTRY = None
 
 
 # ============================================================
