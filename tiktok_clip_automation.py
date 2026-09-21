@@ -2406,8 +2406,8 @@ def watch_kick_clips(stop_event=None, on_processed=None):
 
         if downloaded_path_str:
             local_path = Path(downloaded_path_str)
-            if local_path.exists() and status in {"downloaded", "processing"}:
-                if status == "processing":
+            if local_path.exists() and status in {"queued", "downloaded", "processing", "downloading"}:
+                if status in {"processing", "downloading"}:
                     registry_update(
                         clip_id,
                         status="downloaded",
@@ -2611,6 +2611,19 @@ def watch_kick_clips(stop_event=None, on_processed=None):
             print(f"\n  ⚠️  Error en el loop: {exc}")
             if stop_event.wait(KICK_ERROR_BACKOFF_SECONDS):
                 break
+
+    # Normalizar trabajos que quedaron en la cola de descarga al detenerse.
+    # Los ya descargados conservan su archivo para que el siguiente arranque
+    # los pueda reanudar directamente en la cola de procesamiento.
+    with PIPELINE_REGISTRY_LOCK:
+        for clip_id, record in list(registry.items()):
+            status = record.get("status")
+            if status in {"queued", "downloading"} and not record.get("downloaded_path"):
+                record["status"] = "discovered"
+                record["last_attempt_at"] = 0
+                record["last_error"] = "reanudar tras detención"
+
+        save_clip_registry(registry)
 
     print(
         "\n⏹️  Watcher detenido. "
