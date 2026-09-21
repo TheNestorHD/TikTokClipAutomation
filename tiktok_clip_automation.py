@@ -4912,6 +4912,14 @@ def validate_runtime_config():
         problems.append("NVIDIA_API_KEY está vacío.")
     if TIKTOK_AUTO_UPLOAD and not TIKTOK_COOKIES_FILE.exists():
         problems.append(f"No existe la cookie de TikTok: {TIKTOK_COOKIES_FILE}")
+    if str(USED_DIR_RAW).strip() == RECYCLE_BIN_TOKEN:
+        try:
+            import send2trash  # noqa: F401
+        except ImportError:
+            problems.append(
+                "Falta send2trash para usar la Papelera de reciclaje. "
+                "Ejecutá: pip install send2trash"
+            )
     if shutil.which("ffmpeg") is None:
         problems.append("FFmpeg no está en PATH.")
     return problems
