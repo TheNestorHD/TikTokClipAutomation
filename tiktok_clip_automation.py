@@ -37,8 +37,11 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.2.0"
-APP_DIR = Path(__file__).resolve().parent
+APP_VERSION = "0.3.0"
+if getattr(sys, "frozen", False):
+    APP_DIR = Path(sys.executable).resolve().parent
+else:
+    APP_DIR = Path(__file__).resolve().parent
 ENV_FILE = APP_DIR / ".env"
 load_dotenv(ENV_FILE, override=False)
 
