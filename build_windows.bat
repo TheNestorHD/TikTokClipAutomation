@@ -41,6 +41,37 @@ python -m playwright install chromium
 if errorlevel 1 goto :error
 
 echo.
+echo Buscando herramientas multimedia para incluir en el paquete...
+set "FFMPEG_SOURCE="
+set "FFPROBE_SOURCE="
+set "YTDLP_SOURCE="
+
+for /f "delims=" %%F in ('where ffmpeg 2^>nul') do if not defined FFMPEG_SOURCE set "FFMPEG_SOURCE=%%F"
+for /f "delims=" %%F in ('where ffprobe 2^>nul') do if not defined FFPROBE_SOURCE set "FFPROBE_SOURCE=%%F"
+for /f "delims=" %%F in ('where yt-dlp 2^>nul') do if not defined YTDLP_SOURCE set "YTDLP_SOURCE=%%F"
+
+if not defined FFMPEG_SOURCE (
+    echo ERROR: FFmpeg no esta disponible en PATH.
+    echo Instala FFmpeg antes de compilar TTCA para incluirlo en el paquete.
+    pause
+    exit /b 1
+)
+if not defined FFPROBE_SOURCE (
+    echo ERROR: FFprobe no esta disponible en PATH.
+    echo FFprobe es necesario para analizar los videos.
+    pause
+    exit /b 1
+)
+if not defined YTDLP_SOURCE (
+    echo AVISO: yt-dlp no se encontro como ejecutable.
+    echo TTCA seguira pudiendo usar el fallback de FFmpeg.
+)
+
+echo FFmpeg:  %FFMPEG_SOURCE%
+echo FFprobe: %FFPROBE_SOURCE%
+if defined YTDLP_SOURCE echo yt-dlp:  %YTDLP_SOURCE%
+
+echo.
 echo Limpiando compilaciones anteriores...
 if exist "build" rmdir /s /q "build"
 if exist "dist\TTCA" rmdir /s /q "dist\TTCA"
@@ -68,6 +99,13 @@ if exist "tools" xcopy /e /i /y "tools" "dist\TTCA\tools" >nul
 xcopy /e /i /y "playwright-browsers" "dist\TTCA\playwright-browsers" >nul
 
 echo.
+echo Copiando herramientas multimedia al bundle...
+if not exist "dist\TTCA\tools\bin" mkdir "dist\TTCA\tools\bin"
+copy /y "%FFMPEG_SOURCE%" "dist\TTCA\tools\bin\ffmpeg.exe" >nul
+copy /y "%FFPROBE_SOURCE%" "dist\TTCA\tools\bin\ffprobe.exe" >nul
+if defined YTDLP_SOURCE copy /y "%YTDLP_SOURCE%" "dist\TTCA\tools\bin\yt-dlp.exe" >nul
+
+echo.
 echo ============================================
 echo   COMPILACION TERMINADA
 echo ============================================
@@ -76,9 +114,12 @@ echo Ejecutable:
 echo   dist\TTCA\TTCA.exe
 echo.
 echo Importante:
+echo   - El resultado es un paquete autocontenido en dist\TTCA.
 echo   - Deja .env junto a TTCA.exe.
 echo   - Las cookies NO se incluyen en la compilacion.
 echo   - El archivo .env y tiktok_cookies.txt deben mantenerse privados.
+echo   - FFmpeg, FFprobe y yt-dlp quedan dentro de tools\bin cuando fueron encontrados al compilar.
+echo   - Playwright Chromium queda dentro de playwright-browsers.
 echo.
 pause
 exit /b 0
