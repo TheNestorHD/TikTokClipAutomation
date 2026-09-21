@@ -2971,6 +2971,8 @@ class TikTokClipAutomationApp:
         "Backoff API (s)": "KICK_ERROR_BACKOFF_SECONDS",
         "NVIDIA API Key": "NVIDIA_API_KEY",
         "Reintentos NVIDIA 5xx": "FACE_SERVER_ERROR_RETRIES",
+        "Cooldown mismo momento (s)": "SAME_MOMENT_COOLDOWN_SECONDS",
+        "Cooldown entre procesamientos (s)": "PROCESS_QUEUE_COOLDOWN_SECONDS",
         "Clips": "CLIPS_DIR",
         "Reels": "OUTPUT_DIR",
         "Usados": "USED_DIR",
@@ -3284,12 +3286,12 @@ class TikTokClipAutomationApp:
 
     def process_existing_async(self):
         threading.Thread(
-            target=self._process_existing_worker,
-            name="ExistingClipsWorker",
+            target=self._queue_existing_worker,
+            name="ExistingClipsQueueWorker",
             daemon=True,
         ).start()
 
-    def _process_existing_worker(self):
+    def _queue_existing_worker(self):
         reload_config_from_env()
         clips = sorted(CLIPS_DIR.glob("*.mp4"))
         if not clips:
@@ -3301,24 +3303,64 @@ class TikTokClipAutomationApp:
 
         ensure_dirs()
 
+        if (
+            PIPELINE_JOB_QUEUE is None
+            or PIPELINE_PROCESSING_THREAD is None
+            or not PIPELINE_PROCESSING_THREAD.is_alive()
+        ):
+            self.log(
+                "⚠️  Iniciá el pipeline antes: los clips existentes "
+                "usan la misma cola secuencial que el watcher."
+            )
+            return
+
         if TIKTOK_AUTO_UPLOAD and self.tiktok_manager is None:
             self.tiktok_manager = TikTokUploadManager(log_callback=self.log)
             self.tiktok_manager.start()
 
+        queued_count = 0
         for clip in clips:
             if self.stop_event.is_set():
                 break
-            try:
-                ok = process_one_clip(clip, interactive=False)
-                if ok:
-                    output_path = OUTPUT_DIR / f"reel_{clip.stem}.mp4"
-                    self._pipeline_processed(
-                        output_path,
-                        {"title": clip.stem},
-                    )
-            except Exception as exc:
-                self.log(f"❌ {clip.name}: {exc}")
 
+            clip_path = clip.resolve()
+            clip_id = (
+                "local_"
+                + hashlib.sha1(str(clip_path).encode("utf-8")).hexdigest()[:20]
+            )
+
+            with PIPELINE_REGISTRY_LOCK:
+                record = PIPELINE_REGISTRY.get(clip_id, {})
+                status = record.get("status")
+
+            if status in {"queued", "downloading", "downloaded", "processing", "processed"}:
+                continue
+
+            local_job = {
+                "id": clip_id,
+                "title": clip.stem,
+                "created_at": datetime.fromtimestamp(
+                    clip_path.stat().st_mtime
+                ).isoformat(),
+                "local_path": str(clip_path),
+            }
+
+            with PIPELINE_REGISTRY_LOCK:
+                update_clip_registry(
+                    PIPELINE_REGISTRY,
+                    clip_id,
+                    status="queued",
+                    downloaded_path=str(clip_path),
+                    last_attempt_at=time.time(),
+                    last_error=None,
+                )
+
+            PIPELINE_JOB_QUEUE.put(local_job)
+            queued_count += 1
+
+        self.log(
+            f"📥 {queued_count} clip(s) existente(s) agregados a la cola secuencial."
+        )
         self.root.after(0, self._refresh_queue_view)
 
     def _refresh_queue_view(self):
@@ -3380,6 +3422,7 @@ def reload_config_from_env():
     global KICK_CHANNEL, KICK_POLL_SECONDS, KICK_ERROR_BACKOFF_SECONDS
     global DUPLICATE_WINDOW_SECONDS, DUPLICATE_PHASH_DISTANCE, DUPLICATE_DURATION_TOLERANCE
     global DUPLICATE_TITLE_WINDOW_SECONDS, DUPLICATE_THUMBNAIL_TIMEOUT
+    global SAME_MOMENT_COOLDOWN_SECONDS, PROCESS_QUEUE_COOLDOWN_SECONDS
     global FAILED_RETRY_SECONDS, REGISTRY_MAX_ENTRIES, SKIP_EXISTING_OUTPUT, MIN_VALID_OUTPUT_BYTES
     global TIKTOK_COOKIES_FILE, TIKTOK_HEADLESS, TIKTOK_AUTO_UPLOAD
     global TIKTOK_UPLOAD_START_HOUR, TIKTOK_UPLOAD_END_HOUR, TIKTOK_MAX_PER_DAY
@@ -3446,6 +3489,8 @@ def reload_config_from_env():
     DUPLICATE_DURATION_TOLERANCE = env_int("DUPLICATE_DURATION_TOLERANCE", 20)
     DUPLICATE_TITLE_WINDOW_SECONDS = env_int("DUPLICATE_TITLE_WINDOW_SECONDS", 30)
     DUPLICATE_THUMBNAIL_TIMEOUT = env_int("DUPLICATE_THUMBNAIL_TIMEOUT", 8)
+    SAME_MOMENT_COOLDOWN_SECONDS = max(0, env_int("SAME_MOMENT_COOLDOWN_SECONDS", 45))
+    PROCESS_QUEUE_COOLDOWN_SECONDS = max(0, env_int("PROCESS_QUEUE_COOLDOWN_SECONDS", 5))
 
     FAILED_RETRY_SECONDS = env_int("FAILED_RETRY_SECONDS", 120)
     REGISTRY_MAX_ENTRIES = env_int("REGISTRY_MAX_ENTRIES", 500)
