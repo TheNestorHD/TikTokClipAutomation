@@ -4929,11 +4929,19 @@ def validate_runtime_config():
 
 
 def _prepare_gui_stdio():
-    """Evita cualquier ventana de consola cuando TTCA se ejecuta con pythonw/.pyw."""
+    """Prepara un entorno gráfico silencioso y Playwright portable."""
     if sys.stdout is None:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
+    if getattr(sys, "frozen", False):
+        browser_dir = APP_DIR / "playwright-browsers"
+        if browser_dir.exists():
+            os.environ.setdefault(
+                "PLAYWRIGHT_BROWSERS_PATH",
+                str(browser_dir),
+            )
 
 
 def main():
