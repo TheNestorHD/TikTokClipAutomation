@@ -1418,21 +1418,22 @@ def build_ffmpeg_cmd(
 ):
     """
     Construye el comando FFmpeg completo.
-    Layout:
-        [facecam escalada]
-        [divisor 1080x160]
-        [gameplay centrado]
-    + burn de subtítulos ASS
-    + trim opcional (start_sec / end_sec)
+
+    Con divisor:
+        [facecam] + [divisor 1080x160] + [gameplay]
+
+    Sin divisor:
+        [facecam] + [gameplay ocupando todo el espacio restante]
+
+    + subtítulos ASS + trim opcional.
     """
     fx, fy, fw, fh = facecam_box
 
-    # Validar / clamp del crop de facecam
     fx = max(0, min(int(fx), orig_w - 2))
     fy = max(0, min(int(fy), orig_h - 2))
     fw = max(2, min(int(fw), orig_w - fx))
     fh = max(2, min(int(fh), orig_h - fy))
-    # Dimensiones pares (evita crashes raros de algunos builds)
+
     fw -= fw % 2
     fh -= fh % 2
     fx -= fx % 2
@@ -1440,14 +1441,17 @@ def build_ffmpeg_cmd(
 
     cam_h = max(200, min(int(cam_h), 800))
     cam_h -= cam_h % 2
-    bottom_h = TARGET_H - cam_h - DIVIDER_H
+
+    has_divider = DIVIDER_PATH.exists()
+    effective_divider_h = DIVIDER_H if has_divider else 0
+
+    bottom_h = TARGET_H - cam_h - effective_divider_h
     if bottom_h < 200:
-        cam_h = TARGET_H - DIVIDER_H - 400
+        cam_h = TARGET_H - effective_divider_h - 400
         cam_h -= cam_h % 2
-        bottom_h = TARGET_H - cam_h - DIVIDER_H
+        bottom_h = TARGET_H - cam_h - effective_divider_h
     bottom_h -= bottom_h % 2
 
-    # Crop del gameplay centrado
     aspect_bottom = TARGET_W / max(bottom_h, 1)
     if orig_w / max(orig_h, 1) > aspect_bottom:
         new_w = max(2, int(orig_h * aspect_bottom))
@@ -1464,19 +1468,29 @@ def build_ffmpeg_cmd(
         y0 -= y0 % 2
         game_crop = f"crop={orig_w}:{new_h}:0:{y0}"
 
-    # Fuentes limpias (solo TF2Build.ttf, sin espacios).
-    # Rutas RELATIVAS: FFmpeg corre con cwd=script_dir → evita el infierno de G\:/
     prepare_fonts_dir()
-    ass_name = ass_path.name          # "_temp_subs.ass"
+    ass_name = ass_path.name
     fonts_name = "_fonts_temp"
 
-    filter_complex = (
-        f"[0:v]crop={fw}:{fh}:{fx}:{fy},scale={TARGET_W}:{cam_h}:flags=lanczos,setsar=1[cam];"
-        f"[0:v]{game_crop},scale={TARGET_W}:{bottom_h}:flags=lanczos,setsar=1[game];"
-        f"[1:v]scale={TARGET_W}:{DIVIDER_H},setsar=1[div];"
-        f"[cam][div][game]vstack=inputs=3,setsar=1,format=yuv420p[base];"
-        f"[base]ass={ass_name}:fontsdir={fonts_name}[outv]"
-    )
+    if has_divider:
+        filter_complex = (
+            f"[0:v]crop={fw}:{fh}:{fx}:{fy},scale={TARGET_W}:{cam_h}:flags=lanczos,setsar=1[cam];"
+            f"[0:v]{game_crop},scale={TARGET_W}:{bottom_h}:flags=lanczos,setsar=1[game];"
+            f"[1:v]scale={TARGET_W}:{DIVIDER_H},setsar=1[div];"
+            f"[cam][div][game]vstack=inputs=3,setsar=1,format=yuv420p[base];"
+            f"[base]ass={ass_name}:fontsdir={fonts_name}[outv]"
+        )
+    else:
+        print(
+            "  ℹ️  Sin divisor: el gameplay ocupará automáticamente "
+            f"el espacio completo restante ({bottom_h}px)."
+        )
+        filter_complex = (
+            f"[0:v]crop={fw}:{fh}:{fx}:{fy},scale={TARGET_W}:{cam_h}:flags=lanczos,setsar=1[cam];"
+            f"[0:v]{game_crop},scale={TARGET_W}:{bottom_h}:flags=lanczos,setsar=1[game];"
+            f"[cam][game]vstack=inputs=2,setsar=1,format=yuv420p[base];"
+            f"[base]ass={ass_name}:fontsdir={fonts_name}[outv]"
+        )
 
     cmd = [
         "ffmpeg", "-y",
@@ -1494,15 +1508,8 @@ def build_ffmpeg_cmd(
 
     cmd += ["-i", str(video_path)]
 
-    divider_input = DIVIDER_PATH
-    if not divider_input.exists():
-        divider_input = APP_DIR / "_fallback_divider.png"
-        if not divider_input.exists():
-            fallback = np.zeros((DIVIDER_H, TARGET_W, 3), dtype=np.uint8)
-            fallback[:] = (0, 180, 0)
-            cv2.imwrite(str(divider_input), fallback)
-
-    cmd += ["-i", str(divider_input)]
+    if has_divider:
+        cmd += ["-i", str(DIVIDER_PATH)]
 
     cmd += [
         "-filter_complex", filter_complex,
