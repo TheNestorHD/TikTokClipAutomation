@@ -2171,14 +2171,9 @@ def watch_kick_clips(stop_event=None, on_processed=None):
     La descarga puede adelantarse mientras el processor está ocupado, pero
     las llamadas de IA y los renders siempre son estrictamente secuenciales.
     """
-    global (
-        PIPELINE_DOWNLOAD_QUEUE,
-        PIPELINE_JOB_QUEUE,
-        PIPELINE_DOWNLOAD_THREAD,
-        PIPELINE_PROCESSING_THREAD,
-        PIPELINE_REGISTRY,
-        PIPELINE_ON_PROCESSED,
-    )
+    global PIPELINE_DOWNLOAD_QUEUE, PIPELINE_JOB_QUEUE
+    global PIPELINE_DOWNLOAD_THREAD, PIPELINE_PROCESSING_THREAD
+    global PIPELINE_REGISTRY, PIPELINE_ON_PROCESSED
 
     print("=" * 60)
     print(f"  WATCHER Kick → /{KICK_CHANNEL}")
