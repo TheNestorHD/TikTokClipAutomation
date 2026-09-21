@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.3.2"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -65,15 +65,29 @@ def resolve_path(value: str | Path, default_relative: str = "") -> Path:
         return raw
     return APP_DIR / raw
 
+DEFAULT_RELATIVE_PATHS = {
+    "CLIPS_DIR": "data/clips",
+    "OUTPUT_DIR": "data/reels",
+    "USED_DIR": "data/used",
+    "DIVIDER_PATH": "assets/divider.png",
+    "FONT_PATH": "assets/TF2 build.ttf",
+    "CLIP_REGISTRY_FILE": "data/seen_clips.json",
+    "WHISPER_CPP_EXE": "tools/whisper.cpp/whisper-cli.exe",
+    "WHISPER_CPP_MODEL": "tools/whisper.cpp/models/ggml-large-v3.bin",
+    "TIKTOK_COOKIES_FILE": "data/tiktok_cookies.txt",
+    "TIKTOK_UPLOAD_REGISTRY": "data/tiktok_uploads.json",
+}
+
+
 # --- Rutas ---
-CLIPS_DIR = resolve_path(env_value("CLIPS_DIR", "data/clips"))
-OUTPUT_DIR = resolve_path(env_value("OUTPUT_DIR", "data/reels"))
-USED_DIR_RAW = env_value("USED_DIR", "data/used")
+CLIPS_DIR = resolve_path(env_value("CLIPS_DIR", DEFAULT_RELATIVE_PATHS["CLIPS_DIR"]))
+OUTPUT_DIR = resolve_path(env_value("OUTPUT_DIR", DEFAULT_RELATIVE_PATHS["OUTPUT_DIR"]))
+USED_DIR_RAW = env_value("USED_DIR", DEFAULT_RELATIVE_PATHS["USED_DIR"])
 USED_DIR = resolve_path(USED_DIR_RAW)
 RECYCLE_BIN_TOKEN = "__RECYCLE_BIN__"
-DIVIDER_PATH = resolve_path(env_value("DIVIDER_PATH", "assets/divider.png"))
-FONT_PATH = resolve_path(env_value("FONT_PATH", "assets/TF2 build.ttf"))
-CLIP_REGISTRY_FILE = resolve_path(env_value("CLIP_REGISTRY_FILE", "data/seen_clips.json"))
+DIVIDER_PATH = resolve_path(env_value("DIVIDER_PATH", DEFAULT_RELATIVE_PATHS["DIVIDER_PATH"]))
+FONT_PATH = resolve_path(env_value("FONT_PATH", DEFAULT_RELATIVE_PATHS["FONT_PATH"]))
+CLIP_REGISTRY_FILE = resolve_path(env_value("CLIP_REGISTRY_FILE", DEFAULT_RELATIVE_PATHS["CLIP_REGISTRY_FILE"]))
 
 # --- Video ---
 TARGET_W = env_int("TARGET_W", 1080)
@@ -102,10 +116,10 @@ WHISPER_DEVICE = env_value("WHISPER_DEVICE", "auto")
 WHISPER_COMPUTE = env_value("WHISPER_COMPUTE", "default")
 WHISPER_BACKEND = env_value("WHISPER_BACKEND", "auto")
 WHISPER_CPP_EXE = resolve_path(
-    env_value("WHISPER_CPP_EXE", "tools/whisper.cpp/whisper-cli.exe")
+    env_value("WHISPER_CPP_EXE", DEFAULT_RELATIVE_PATHS["WHISPER_CPP_EXE"])
 )
 WHISPER_CPP_MODEL = resolve_path(
-    env_value("WHISPER_CPP_MODEL", "tools/whisper.cpp/models/ggml-large-v3.bin")
+    env_value("WHISPER_CPP_MODEL", DEFAULT_RELATIVE_PATHS["WHISPER_CPP_MODEL"])
 )
 WHISPER_CPP_THREADS = env_int(
     "WHISPER_CPP_THREADS",
@@ -146,7 +160,7 @@ MIN_VALID_OUTPUT_BYTES = env_int("MIN_VALID_OUTPUT_BYTES", 10 * 1024)
 
 # --- TikTok ---
 TIKTOK_COOKIES_FILE = resolve_path(
-    env_value("TIKTOK_COOKIES_FILE", "data/tiktok_cookies.txt")
+    env_value("TIKTOK_COOKIES_FILE", DEFAULT_RELATIVE_PATHS["TIKTOK_COOKIES_FILE"])
 )
 TIKTOK_HEADLESS = env_bool("TIKTOK_HEADLESS", True)
 TIKTOK_AUTO_UPLOAD = env_bool("TIKTOK_AUTO_UPLOAD", True)
@@ -168,7 +182,7 @@ TIKTOK_HASHTAGS = env_value(
     "#tiktok #kick",
 )
 TIKTOK_UPLOAD_REGISTRY = resolve_path(
-    env_value("TIKTOK_UPLOAD_REGISTRY", "data/tiktok_uploads.json")
+    env_value("TIKTOK_UPLOAD_REGISTRY", DEFAULT_RELATIVE_PATHS["TIKTOK_UPLOAD_REGISTRY"])
 )
 
 PIPELINE_ON_PROCESSED = None
@@ -277,6 +291,11 @@ def ensure_dirs(strict: bool = False):
 
     CLIP_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
     TIKTOK_UPLOAD_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
+    TIKTOK_COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DIVIDER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    FONT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    WHISPER_CPP_EXE.parent.mkdir(parents=True, exist_ok=True)
+    WHISPER_CPP_MODEL.parent.mkdir(parents=True, exist_ok=True)
 
     if not DIVIDER_PATH.exists():
         print(f"ℹ️  No se encontró el divisor: {DIVIDER_PATH}")
@@ -560,10 +579,28 @@ def _make_trim_proxy(video_path: Path, duration: float) -> tuple[Path, float, fl
     return None
 
 
+def _channel_hashtag(channel: str) -> str:
+    import re
+    cleaned = re.sub(r"[^a-z0-9_]+", "", (channel or "").strip().lower())
+    return f"#{cleaned}" if cleaned else "#kick"
+
+
+def _ensure_omni_identity_hashtags(caption: str, channel: str) -> str:
+    caption = " ".join((caption or "").replace("\n", " ").split()).strip()
+    channel_tag = _channel_hashtag(channel)
+    lower = caption.lower()
+    if channel_tag.lower() not in lower:
+        caption = f"{caption} {channel_tag}".strip()
+    if "#kick" not in lower:
+        caption = f"{caption} #kick".strip()
+    return " ".join(caption.split())
+
+
 def suggest_trim_omni_video(
     video_path: Path,
     duration: float,
     clip_title: str = "",
+    clip_channel: str = "",
     max_retries: int = 5,
 ) -> dict | None:
     """
@@ -582,6 +619,7 @@ def suggest_trim_omni_video(
 
     proxy, source_offset, proxy_duration = proxy_data
     title_for_prompt = (clip_title or video_path.stem or "Nuevo clip").strip()
+    channel_for_prompt = (clip_channel or KICK_CHANNEL or "canal").strip()
 
     try:
         b64 = base64.b64encode(proxy.read_bytes()).decode("utf-8")
@@ -594,6 +632,7 @@ ADEMÁS, generá una descripción para TikTok basándote en lo que ocurre en el 
 - Debe sonar natural, breve y atractiva para un Reel.
 - Conservá el tono rioplatense/humorístico del streamer cuando corresponda.
 - Incluí 3 a 6 hashtags relevantes.
+- Obligatoriamente incluí un hashtag con el nombre del canal y el hashtag #kick.
 - La descripción completa (texto + hashtags) no debe superar 220 caracteres.
 """
         prompt = f"""Sos editor de Reels virales del streamer argentino "Eskrotos" (Kick).
@@ -601,6 +640,12 @@ Estilo: humor absurdo, reacciones exageradas, sarcasmo, fallos épicos, punchlin
 
 TÍTULO ORIGINAL DEL CLIP EN KICK:
 "{title_for_prompt}"
+
+CANAL:
+"{channel_for_prompt}"
+
+PLATAFORMA:
+"Kick"
 
 Estás VIENDO un proxy de 720p a 1 FPS.
 El proxy representa desde {source_offset:.1f}s hasta {source_offset + proxy_duration:.1f}s del clip original.
@@ -710,8 +755,16 @@ No agregues Markdown ni texto fuera del JSON.
                 caption = " ".join(
                     str(obj.get("caption") or "").replace("\n", " ").split()
                 )
+                caption = _ensure_omni_identity_hashtags(
+                    caption,
+                    channel_for_prompt,
+                )
                 if len(caption) > 220:
                     caption = caption[:220].rstrip()
+                caption = _ensure_omni_identity_hashtags(
+                    caption,
+                    channel_for_prompt,
+                )
 
                 print(
                     f"  ✅ Omni (video): {start:.1f}s → {end:.1f}s "
@@ -754,6 +807,7 @@ def suggest_trim_llm(
     duration: float,
     video_path: Path | None = None,
     clip_title: str = "",
+    clip_channel: str = "",
 ) -> dict | None:
     """Punto de entrada al auto-trim; usa Nemotron Omni para trim y contexto."""
     if video_path is not None and video_path.exists():
@@ -761,6 +815,7 @@ def suggest_trim_llm(
             video_path,
             duration,
             clip_title=clip_title,
+            clip_channel=clip_channel,
         )
 
     print("  ⚠️  Sin video para Omni; no se sugiere trim automático.")
@@ -1767,10 +1822,16 @@ def process_one_clip(
         or video_path.stem
         or "Nuevo clip"
     )
+    clip_channel = (
+        (clip_metadata or {}).get("channel")
+        or KICK_CHANNEL
+        or "canal"
+    )
     suggested = suggest_trim_llm(
         duration,
         video_path=video_path,
         clip_title=clip_title,
+        clip_channel=clip_channel,
     )
     if suggested:
         start_sec = float(suggested["start"])
@@ -2511,6 +2572,8 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                 process_queue.put({
                     **clip,
                     "id": clip_id,
+                    "channel": clip.get("channel") or KICK_CHANNEL,
+                    "platform": clip.get("platform") or "Kick",
                     "local_path": str(path),
                 })
 
@@ -3558,8 +3621,9 @@ class TikTokClipAutomationApp:
     BORDER = "#28364C"
     TEXT = "#F3F5F9"
     MUTED = "#8F9BB2"
-    ACCENT = "#6C63FF"
-    ACCENT_HOVER = "#7D75FF"
+    ACCENT = "#53FC18"
+    ACCENT_HOVER = "#73FF3D"
+    ACCENT_TEXT = "#071007"
     GREEN = "#3DDC97"
     YELLOW = "#FFC857"
     RED = "#FF5D73"
@@ -3663,7 +3727,7 @@ class TikTokClipAutomationApp:
             corner_radius=10,
             fg_color=self.ACCENT if primary else self.CARD_ALT,
             hover_color=self.ACCENT_HOVER if primary else self.BORDER,
-            text_color=self.TEXT,
+            text_color=self.ACCENT_TEXT if primary else self.TEXT,
             font=self.ctk.CTkFont(family="Segoe UI", size=12, weight="bold"),
             **kwargs,
         )
@@ -3829,7 +3893,8 @@ class TikTokClipAutomationApp:
 
         for key, btn in self.nav_buttons.items():
             btn.configure(
-                fg_color=self.ACCENT if key == page_id else "transparent"
+                fg_color=self.ACCENT if key == page_id else "transparent",
+                text_color=self.ACCENT_TEXT if key == page_id else self.TEXT,
             )
 
     # --------------------------------------------------------
@@ -4603,9 +4668,19 @@ class TikTokClipAutomationApp:
             "TIKTOK_PROCESSING_TIMEOUT_SECONDS",
             "TIKTOK_CONFIRM_TIMEOUT_SECONDS",
         ]
+        defaults = {
+            "CLIPS_DIR": DEFAULT_RELATIVE_PATHS["CLIPS_DIR"],
+            "OUTPUT_DIR": DEFAULT_RELATIVE_PATHS["OUTPUT_DIR"],
+            "USED_DIR": DEFAULT_RELATIVE_PATHS["USED_DIR"],
+            "DIVIDER_PATH": DEFAULT_RELATIVE_PATHS["DIVIDER_PATH"],
+            "FONT_PATH": DEFAULT_RELATIVE_PATHS["FONT_PATH"],
+            "WHISPER_CPP_EXE": DEFAULT_RELATIVE_PATHS["WHISPER_CPP_EXE"],
+            "WHISPER_CPP_MODEL": DEFAULT_RELATIVE_PATHS["WHISPER_CPP_MODEL"],
+            "TIKTOK_COOKIES_FILE": DEFAULT_RELATIVE_PATHS["TIKTOK_COOKIES_FILE"],
+        }
         for key in keys:
             var = self._ensure_var(key)
-            var.set(str(os.getenv(key, "")))
+            var.set(str(env_value(key, defaults.get(key, ""))))
 
         self.auto_upload_var.set(env_bool("TIKTOK_AUTO_UPLOAD", True))
         self.headless_var.set(env_bool("TIKTOK_HEADLESS", True))
@@ -4908,8 +4983,6 @@ class TikTokClipAutomationApp:
             self.root.after(0, self._pipeline_stopped_ui)
 
     def _pipeline_processed(self, output_path: Path, clip: dict):
-        if not TIKTOK_AUTO_UPLOAD:
-            return
         if self.tiktok_manager is None:
             self.tiktok_manager = TikTokUploadManager(log_callback=self.log)
             self.tiktok_manager.start()
@@ -4995,6 +5068,8 @@ class TikTokClipAutomationApp:
             local_job = {
                 "id": clip_id,
                 "title": clip.stem,
+                "channel": KICK_CHANNEL,
+                "platform": "Kick",
                 "created_at": datetime.fromtimestamp(
                     clip_path.stat().st_mtime
                 ).isoformat(),
@@ -5183,13 +5258,13 @@ def reload_config_from_env():
     global TIKTOK_UPLOAD_CHECK_SECONDS, FFMPEG_PRIORITY, FFMPEG_THREADS
     global TIKTOK_CAPTION_MODE, TIKTOK_CAPTION_TEMPLATE, TIKTOK_HASHTAGS, TIKTOK_UPLOAD_REGISTRY
 
-    CLIPS_DIR = resolve_path(env_value("CLIPS_DIR", "data/clips"))
-    OUTPUT_DIR = resolve_path(env_value("OUTPUT_DIR", "data/reels"))
-    USED_DIR_RAW = env_value("USED_DIR", "data/used")
+    CLIPS_DIR = resolve_path(env_value("CLIPS_DIR", DEFAULT_RELATIVE_PATHS["CLIPS_DIR"]))
+    OUTPUT_DIR = resolve_path(env_value("OUTPUT_DIR", DEFAULT_RELATIVE_PATHS["OUTPUT_DIR"]))
+    USED_DIR_RAW = env_value("USED_DIR", DEFAULT_RELATIVE_PATHS["USED_DIR"])
     USED_DIR = resolve_path(USED_DIR_RAW)
-    DIVIDER_PATH = resolve_path(env_value("DIVIDER_PATH", "assets/divider.png"))
-    FONT_PATH = resolve_path(env_value("FONT_PATH", "assets/TF2 build.ttf"))
-    CLIP_REGISTRY_FILE = resolve_path(env_value("CLIP_REGISTRY_FILE", "data/seen_clips.json"))
+    DIVIDER_PATH = resolve_path(env_value("DIVIDER_PATH", DEFAULT_RELATIVE_PATHS["DIVIDER_PATH"]))
+    FONT_PATH = resolve_path(env_value("FONT_PATH", DEFAULT_RELATIVE_PATHS["FONT_PATH"]))
+    CLIP_REGISTRY_FILE = resolve_path(env_value("CLIP_REGISTRY_FILE", DEFAULT_RELATIVE_PATHS["CLIP_REGISTRY_FILE"]))
 
     TARGET_W = env_int("TARGET_W", 1080)
     TARGET_H = env_int("TARGET_H", 1920)
@@ -5214,10 +5289,10 @@ def reload_config_from_env():
     WHISPER_COMPUTE = env_value("WHISPER_COMPUTE", "default")
     WHISPER_BACKEND = env_value("WHISPER_BACKEND", "auto")
     WHISPER_CPP_EXE = resolve_path(
-        env_value("WHISPER_CPP_EXE", "tools/whisper.cpp/whisper-cli.exe")
+        env_value("WHISPER_CPP_EXE", DEFAULT_RELATIVE_PATHS["WHISPER_CPP_EXE"])
     )
     WHISPER_CPP_MODEL = resolve_path(
-        env_value("WHISPER_CPP_MODEL", "tools/whisper.cpp/models/ggml-large-v3.bin")
+        env_value("WHISPER_CPP_MODEL", DEFAULT_RELATIVE_PATHS["WHISPER_CPP_MODEL"])
     )
     WHISPER_CPP_THREADS = env_int(
         "WHISPER_CPP_THREADS",
@@ -5253,7 +5328,7 @@ def reload_config_from_env():
     MIN_VALID_OUTPUT_BYTES = env_int("MIN_VALID_OUTPUT_BYTES", 10 * 1024)
 
     TIKTOK_COOKIES_FILE = resolve_path(
-        env_value("TIKTOK_COOKIES_FILE", "data/tiktok_cookies.txt")
+        env_value("TIKTOK_COOKIES_FILE", DEFAULT_RELATIVE_PATHS["TIKTOK_COOKIES_FILE"])
     )
     TIKTOK_HEADLESS = env_bool("TIKTOK_HEADLESS", True)
     TIKTOK_AUTO_UPLOAD = env_bool("TIKTOK_AUTO_UPLOAD", True)
@@ -5285,7 +5360,7 @@ def reload_config_from_env():
         "#tiktok #kick",
     )
     TIKTOK_UPLOAD_REGISTRY = resolve_path(
-        env_value("TIKTOK_UPLOAD_REGISTRY", "data/tiktok_uploads.json")
+        env_value("TIKTOK_UPLOAD_REGISTRY", DEFAULT_RELATIVE_PATHS["TIKTOK_UPLOAD_REGISTRY"])
     )
 
 
