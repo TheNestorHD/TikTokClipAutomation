@@ -18,9 +18,13 @@ La interfaz incluye accesos directos para obtener una API Key de NVIDIA desde NV
 
 `python tiktok_clip_automation.py`
 
-La interfaz de escritorio muestra el estado del watcher, las colas, la etapa actual, el tiempo activo, TikTok y los errores. La edición usa una **única cola secuencial**, por lo que nunca se ejecutan dos procesos de edición/IA al mismo tiempo.
+La interfaz de escritorio muestra el estado del watcher, las colas, la etapa actual, el tiempo activo, TikTok y los errores. El acento visual de la aplicación usa el verde de Kick (`#53FC18`). La edición usa una **única cola secuencial**, por lo que nunca se ejecutan dos procesos de edición/IA al mismo tiempo.
 
 La versión actual también incorpora un uploader de TikTok guiado y sin programación horaria: cada Reel terminado entra a la cola de TikTok. Según la configuración, se publica inmediatamente o se sube como borrador para revisión.
+
+## Rutas
+
+Las rutas estándar se configuran automáticamente como rutas relativas a la carpeta del programa (`data/clips`, `data/reels`, `data/used`, `assets`, `tools`, etc.). TTCA crea automáticamente las carpetas necesarias al iniciar. Si elegís una ubicación externa desde la interfaz, esa ruta se conserva como absoluta; las rutas internas al programa se vuelven a guardar como relativas.
 
 ## Watcher
 
@@ -42,7 +46,7 @@ No se aplican horarios, franjas, límites diarios ni intervalos artificiales. Un
 - **Publicar automáticamente activado:** se publica en TikTok.
 - **Publicar automáticamente desactivado:** se sube a TikTok y se guarda como borrador, sin publicarlo.
 
-La descripción admite dos modos. **Título + hashtags** usa una plantilla configurable con `{title}` y `{hashtags}`. **IA · Omni** envía a Nemotron Omni el mismo proxy 720p/1 FPS usado para el recorte y, además, el título original de Kick; con ese contexto genera la descripción y los hashtags. Si Omni no devuelve una descripción válida, TTCA vuelve a la plantilla manual.
+La descripción admite dos modos. **Título + hashtags** usa una plantilla configurable con `{title}` y `{hashtags}`. **IA · Omni** envía a Nemotron Omni el mismo proxy 720p/1 FPS usado para el recorte y, además, el título, el nombre del canal y la plataforma (`Kick`); con ese contexto genera la descripción y los hashtags. En modo IA, TTCA garantiza además el hashtag del canal y `#kick`. Si Omni no devuelve una descripción válida, TTCA vuelve a la plantilla manual.
 
 Los fallos usan los reintentos internos configurados en `TIKTOK_UPLOAD_RETRIES`; con el valor predeterminado no hay espera adicional entre reintentos.
 
