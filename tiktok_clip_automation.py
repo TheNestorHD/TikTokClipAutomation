@@ -4186,7 +4186,7 @@ class TikTokClipAutomationApp:
             scroll,
             "6",
             "Rutas y herramientas",
-            "Las rutas pueden ser absolutas o relativas a la carpeta de TTCA.",
+            "Las rutas estándar se configuran automáticamente como relativas a la carpeta de TTCA y sus carpetas se crean al iniciar. También podés elegir una ubicación externa.",
             self._make_paths_form,
             {},
         )
@@ -4799,7 +4799,12 @@ class TikTokClipAutomationApp:
 
     def _refresh_cookie_status(self):
         try:
-            path = Path(self.entry_vars.get("TIKTOK_COOKIES_FILE", tk.StringVar()).get().strip())
+            path = resolve_path(
+                self.entry_vars.get(
+                    "TIKTOK_COOKIES_FILE",
+                    tk.StringVar(),
+                ).get().strip()
+            )
             if path.exists():
                 self.cookie_status.configure(
                     text=f"✓ Cookies encontradas · {path}",
@@ -4837,9 +4842,10 @@ class TikTokClipAutomationApp:
     def _choose_directory(self, key):
         current = self.entry_vars.get(key)
         initial = current.get() if current else str(APP_DIR)
+        initial_path = resolve_path(initial) if initial else APP_DIR
         path = filedialog.askdirectory(
             title=f"Seleccionar {key}",
-            initialdir=initial if Path(initial).exists() else str(APP_DIR),
+            initialdir=str(initial_path) if initial_path.exists() else str(APP_DIR),
         )
         if path:
             self._ensure_var(key).set(path)
@@ -4847,7 +4853,12 @@ class TikTokClipAutomationApp:
     def _choose_file_for_key(self, key):
         current = self.entry_vars.get(key)
         initial = current.get() if current else str(APP_DIR)
-        initial_dir = str(Path(initial).parent) if Path(initial).parent.exists() else str(APP_DIR)
+        initial_path = resolve_path(initial) if initial else APP_DIR
+        initial_dir = (
+            str(initial_path.parent)
+            if initial_path.parent.exists()
+            else str(APP_DIR)
+        )
         path = filedialog.askopenfilename(
             title=f"Seleccionar {key}",
             initialdir=initial_dir,
