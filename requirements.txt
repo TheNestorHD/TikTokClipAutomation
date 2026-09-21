@@ -1,0 +1,8 @@
+opencv-python
+numpy
+pillow
+requests
+faster-whisper
+python-dotenv
+playwright
+yt-dlp
