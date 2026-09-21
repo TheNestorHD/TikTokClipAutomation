@@ -1389,6 +1389,18 @@ def prepare_fonts_dir() -> Path:
     return clean_fonts_dir
 
 
+def ffmpeg_creation_flags():
+    """Ejecuta FFmpeg con prioridad reducida en Windows."""
+    if os.name != "nt":
+        return 0
+    priorities = {
+        "normal": getattr(subprocess, "NORMAL_PRIORITY_CLASS", 0),
+        "below_normal": getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0),
+        "idle": getattr(subprocess, "IDLE_PRIORITY_CLASS", 0),
+    }
+    return priorities.get(FFMPEG_PRIORITY, priorities["idle"])
+
+
 def build_ffmpeg_cmd(
     video_path: Path,
     output_path: Path,
@@ -1498,6 +1510,7 @@ def build_ffmpeg_cmd(
         "-profile:v", "high",
         "-level", "4.2",
         "-pix_fmt", "yuv420p",
+        "-threads", str(FFMPEG_THREADS),
         "-c:a", "aac",
         "-b:a", "192k",
         "-ar", "44100",
@@ -1718,6 +1731,7 @@ def process_one_clip(video_path: Path, interactive: bool = True):
             encoding="utf-8",
             errors="replace",
             cwd=str(script_dir),
+            creationflags=ffmpeg_creation_flags(),
         )
 
         full_log = []
