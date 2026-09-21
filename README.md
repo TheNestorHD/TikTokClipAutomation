@@ -20,7 +20,7 @@ La interfaz incluye accesos directos para obtener una API Key de NVIDIA desde NV
 
 La interfaz de escritorio muestra el estado del watcher, las colas, la etapa actual, el tiempo activo, TikTok y los errores. La edición usa una **única cola secuencial**, por lo que nunca se ejecutan dos procesos de edición/IA al mismo tiempo.
 
-La versión actual también incorpora un uploader de TikTok guiado y sin programación horaria: cuando termina un Reel y la publicación automática está activada, entra directamente a la cola de TikTok.
+La versión actual también incorpora un uploader de TikTok guiado y sin programación horaria: cada Reel terminado entra a la cola de TikTok. Según la configuración, se publica inmediatamente o se sube como borrador para revisión.
 
 ## Watcher
 
@@ -38,9 +38,15 @@ FFmpeg se lanza en Windows con prioridad **Idle** por defecto y con un número r
 
 El uploader integrado usa Playwright + cookies Netscape. Los Reels se guardan en una cola persistente para evitar publicaciones duplicadas.
 
-No se aplican horarios, franjas, límites diarios ni intervalos artificiales: un Reel terminado se publica inmediatamente cuando la opción de automatización está activada. Los fallos usan los reintentos internos configurados en `TIKTOK_UPLOAD_RETRIES`; con el valor predeterminado no hay espera adicional entre reintentos.
+No se aplican horarios, franjas, límites diarios ni intervalos artificiales. Un Reel terminado se procesa inmediatamente:
+- **Publicar automáticamente activado:** se publica en TikTok.
+- **Publicar automáticamente desactivado:** se sube a TikTok y se guarda como borrador, sin publicarlo.
 
-La interfaz permite activar/desactivar la publicación automática, seleccionar el archivo de cookies y abrir las páginas necesarias para preparar la cuenta.
+La descripción admite dos modos. **Título + hashtags** usa una plantilla configurable con `{title}` y `{hashtags}`. **IA · Omni** envía a Nemotron Omni el mismo proxy 720p/1 FPS usado para el recorte y, además, el título original de Kick; con ese contexto genera la descripción y los hashtags. Si Omni no devuelve una descripción válida, TTCA vuelve a la plantilla manual.
+
+Los fallos usan los reintentos internos configurados en `TIKTOK_UPLOAD_RETRIES`; con el valor predeterminado no hay espera adicional entre reintentos.
+
+La interfaz permite elegir el destino publicación/borrador, seleccionar el archivo de cookies y abrir las páginas necesarias para preparar la cuenta.
 
 ## Seguridad
 
