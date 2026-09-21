@@ -1799,7 +1799,8 @@ def process_one_clip(
     # Guardamos el .ass temporal al lado del script (ruta más simple y estable en Windows)
     script_dir = Path(__file__).resolve().parent
     ass_path = script_dir / "_temp_subs.ass"
-    text_y = cam_h + DIVIDER_H + SUB_Y_OFFSET
+    effective_divider_h = DIVIDER_H if DIVIDER_PATH.exists() else 0
+    text_y = cam_h + effective_divider_h + SUB_Y_OFFSET
 
     try:
         if words:
