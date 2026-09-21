@@ -2742,11 +2742,16 @@ def subir_video(ruta_video: Path, caption: str) -> bool:
     """Intenta publicar un Reel en TikTok Studio usando Playwright."""
     for intento in range(1, TIKTOK_UPLOAD_RETRIES + 1):
         if intento > 1:
-            print(
-                f"\n↻ Reintento {intento}/{TIKTOK_UPLOAD_RETRIES} "
-                f"en {TIKTOK_UPLOAD_RETRY_DELAY_SECONDS}s..."
-            )
-            time.sleep(TIKTOK_UPLOAD_RETRY_DELAY_SECONDS)
+            if TIKTOK_UPLOAD_RETRY_DELAY_SECONDS > 0:
+                print(
+                    f"\n↻ Reintento {intento}/{TIKTOK_UPLOAD_RETRIES} "
+                    f"en {TIKTOK_UPLOAD_RETRY_DELAY_SECONDS}s..."
+                )
+                time.sleep(TIKTOK_UPLOAD_RETRY_DELAY_SECONDS)
+            else:
+                print(
+                    f"\n↻ Reintento {intento}/{TIKTOK_UPLOAD_RETRIES} inmediato..."
+                )
 
         if _subir_video_intento(ruta_video, caption, intento):
             return True
@@ -4846,7 +4851,20 @@ def main():
     reload_config_from_env()
     ensure_dirs()
 
-    import customtkinter as ctk
+    try:
+        import customtkinter as ctk
+    except ImportError as exc:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror(
+            "TikTok Clip Automation",
+            "Falta la interfaz gráfica de TTCA. Ejecutá:\n\n"
+            "pip install -r requirements.txt\n\n"
+            f"Detalle: {exc}",
+        )
+        root.destroy()
+        return
+
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("dark-blue")
 
