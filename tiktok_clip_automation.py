@@ -1977,6 +1977,10 @@ def _find_duplicate_clip(clip: dict, fingerprint: str | None, registry: dict) ->
             except (TypeError, ValueError):
                 pass
 
+        if delta <= SAME_MOMENT_COOLDOWN_SECONDS:
+            candidates.append((-1, other_id))
+            continue
+
         distance = _phash_distance(fingerprint, record.get("fingerprint"))
         if distance is not None and distance <= DUPLICATE_PHASH_DISTANCE:
             candidates.append((distance, other_id))
