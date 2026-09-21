@@ -4854,7 +4854,7 @@ class TikTokClipAutomationApp:
             self.start_button.configure(state="disabled")
             self.stop_button.configure(state="normal")
             self.activity_progress.start()
-            self.log("🚀 TTCA v0.2 iniciado.")
+            self.log(f"🚀 TTCA v{APP_VERSION} iniciado.")
         except Exception as exc:
             self.log(f"❌ No se pudo iniciar el pipeline: {exc}")
             messagebox.showerror(self.TITLE, str(exc))
@@ -5264,7 +5264,7 @@ def validate_runtime_config():
     problems = []
     if not NVIDIA_API_KEY:
         problems.append("NVIDIA_API_KEY está vacío.")
-    if TIKTOK_AUTO_UPLOAD and not TIKTOK_COOKIES_FILE.exists():
+    if not TIKTOK_COOKIES_FILE.exists():
         problems.append(f"No existe la cookie de TikTok: {TIKTOK_COOKIES_FILE}")
     if str(USED_DIR_RAW).strip() == RECYCLE_BIN_TOKEN:
         try:
