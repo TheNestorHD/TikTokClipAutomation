@@ -74,7 +74,7 @@ WHISPER_CPP_THREADS = max(2, min(8, os.cpu_count() or 8))
 
 # NVIDIA API
 # ⚠️ Credencial de prueba de uso personal.
-NVIDIA_API_KEY = "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"
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 NVIDIA_API_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
 # Auto-trim: Nemotron Omni CON VIDEO
@@ -82,8 +82,8 @@ NVIDIA_TRIM_OMNI = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 NVIDIA_TRIM_OMNI_TIMEOUT = 180
 
 # Watcher de clips de Kick
-KICK_CHANNEL = "eskrotos"
-KICK_POLL_SECONDS = 5
+KICK_CHANNEL = os.getenv("KICK_CHANNEL", "eskrotos")
+KICK_POLL_SECONDS = max(1, int(float(os.getenv("KICK_POLL_SECONDS", "1"))))
 
 # Deduplicación: evita bajar varias veces el mismo momento capturado por usuarios distintos.
 DUPLICATE_WINDOW_SECONDS = 75
