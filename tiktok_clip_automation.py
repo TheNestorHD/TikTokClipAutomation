@@ -241,8 +241,8 @@ def ensure_dirs(strict: bool = False):
     TIKTOK_UPLOAD_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
 
     if not DIVIDER_PATH.exists():
-        print(f"⚠️  No se encontró el divisor: {DIVIDER_PATH}")
-        print("   Se usará un divisor de emergencia durante el render.")
+        print(f"ℹ️  No se encontró el divisor: {DIVIDER_PATH}")
+        print("   El gameplay ocupará automáticamente el espacio que dejaría el divisor.")
     if not FONT_PATH.exists():
         print(f"⚠️  No se encontró la fuente: {FONT_PATH}")
         print("   FFmpeg usará una fuente alternativa del sistema.")
