@@ -183,8 +183,24 @@ PIPELINE_REGISTRY_LOCK = threading.RLock()
 # UTILIDADES
 # ============================================================
 
+def resolve_tool(name: str) -> str | None:
+    """Busca una herramienta primero dentro del bundle de TTCA y después en PATH."""
+    exe_name = f"{name}.exe" if os.name == "nt" else name
+    for candidate in (
+        APP_DIR / "tools" / "bin" / exe_name,
+        APP_DIR / exe_name,
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return shutil.which(name)
+
+
+FFMPEG_EXE = None
+FFPROBE_EXE = None
+YTDLP_EXE = None
+
 def check_dependencies(exit_on_error: bool = False):
-    global cv2, np
+    global cv2, np, FFMPEG_EXE, FFPROBE_EXE, YTDLP_EXE
 
     missing = []
 
@@ -230,13 +246,25 @@ def check_dependencies(exit_on_error: bool = False):
             sys.exit(1)
         return False
 
-    if shutil.which("ffmpeg") is None:
-        print("❌ No se encontró FFmpeg en el PATH.")
+    FFMPEG_EXE = resolve_tool("ffmpeg")
+    FFPROBE_EXE = resolve_tool("ffprobe")
+    YTDLP_EXE = resolve_tool("yt-dlp")
+
+    if not FFMPEG_EXE:
+        print("❌ No se encontró FFmpeg (bundle/PATH).")
+        if exit_on_error:
+            sys.exit(1)
+        return False
+
+    if not FFPROBE_EXE:
+        print("❌ No se encontró FFprobe (bundle/PATH).")
         if exit_on_error:
             sys.exit(1)
         return False
 
     print("✅ Dependencias OK")
+    if YTDLP_EXE:
+        print(f"   yt-dlp: {YTDLP_EXE}")
     return True
 
 
@@ -264,7 +292,7 @@ def ensure_dirs(strict: bool = False):
 def get_video_info(path: Path):
     """Obtiene width, height, fps, duration, nb_frames con ffprobe."""
     cmd = [
-        "ffprobe", "-v", "quiet",
+        (FFPROBE_EXE or "ffprobe"), "-v", "quiet",
         "-print_format", "json",
         "-show_format", "-show_streams",
         str(path)
@@ -512,7 +540,7 @@ def _make_trim_proxy(video_path: Path, duration: float) -> tuple[Path, float, fl
 
     out = Path(tempfile.gettempdir()) / f"_eskrotos_trim_proxy_{os.getpid()}.mp4"
     cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        (FFMPEG_EXE or "ffmpeg"), "-y", "-hide_banner", "-loglevel", "error",
         "-ss", f"{source_offset:.3f}",
         "-t", f"{proxy_duration:.3f}",
         "-i", str(video_path),
@@ -1554,7 +1582,7 @@ def build_ffmpeg_cmd(
         )
 
     cmd = [
-        "ffmpeg", "-y",
+        (FFMPEG_EXE or "ffmpeg"), "-y",
         "-hide_banner",
     ]
 
@@ -2184,7 +2212,7 @@ def download_kick_clip(clip: dict, dest_dir: Path) -> Path | None:
 
     max_attempts = 3
 
-    yt_dlp = shutil.which("yt-dlp")
+    yt_dlp = YTDLP_EXE or resolve_tool("yt-dlp")
     if yt_dlp:
         cmd = [
             yt_dlp,
@@ -5275,8 +5303,10 @@ def validate_runtime_config():
                 "Falta send2trash para usar la Papelera de reciclaje. "
                 "Ejecutá: pip install send2trash"
             )
-    if shutil.which("ffmpeg") is None:
-        problems.append("FFmpeg no está en PATH.")
+    if not resolve_tool("ffmpeg"):
+        problems.append("No se encontró FFmpeg ni dentro del bundle ni en PATH.")
+    if not resolve_tool("ffprobe"):
+        problems.append("No se encontró FFprobe ni dentro del bundle ni en PATH.")
     return problems
 
 
