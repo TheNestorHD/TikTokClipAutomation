@@ -1,10 +1,26 @@
+import ast
 import json
-import os
+import random
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-import tiktok_clip_automation as ttca
+
+SOURCE = Path(__file__).resolve().parents[1] / "tiktok_clip_automation.py"
+
+FUNCTIONS = {
+    "_coerce_text",
+    "_clean_transcribed_words",
+    "_parse_kimi_transcription_response",
+    "_clip_category_name",
+    "is_just_chatting_clip",
+    "pick_just_chatting_gameplay",
+    "just_chatting_top_height",
+    "prepare_fonts_dir",
+    "create_ass_file",
+    "build_ffmpeg_cmd",
+}
 
 
 def run(cmd, cwd=None):
@@ -17,14 +33,35 @@ def run(cmd, cwd=None):
         check=False,
     )
     if result.returncode != 0:
-        raise AssertionError(result.stdout)
+        raise AssertionError("Command failed:\n" + " ".join(map(str, cmd)) + "\n\n" + result.stdout)
     return result
 
 
+def load_functions():
+    source = SOURCE.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(SOURCE))
+    selected = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in FUNCTIONS
+    ]
+    namespace = {
+        "__builtins__": __builtins__,
+        "ast": ast,
+        "json": json,
+        "random": random,
+        "shutil": shutil,
+        "Path": Path,
+    }
+    exec(compile(ast.Module(body=selected, type_ignores=[]), str(SOURCE), "exec"), namespace)
+    return namespace
+
+
 def main():
-    # Parser regression: Omni puede devolver campos estructurados.
-    assert ttca._coerce_text({"caption": "hola"}) == "hola"
-    parsed = ttca._parse_kimi_transcription_response(
+    namespace = load_functions()
+
+    assert namespace["_coerce_text"]({"caption": "hola"}) == "hola"
+    parsed = namespace["_parse_kimi_transcription_response"](
         json.dumps(
             {
                 "words": [
@@ -38,14 +75,24 @@ def main():
 
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
-        ttca.APP_DIR = work
-        ttca.TARGET_W = 1080
-        ttca.TARGET_H = 1920
-        ttca.DIVIDER_H = 160
-        ttca.DIVIDER_PATH = work / "divider.png"
-        ttca.FONT_PATH = work / "missing.ttf"
-        ttca.FFMPEG_EXE = "ffmpeg"
-        ttca.FFMPEG_THREADS = 1
+        ns = namespace
+        ns.update({
+            "APP_DIR": work,
+            "TARGET_W": 1080,
+            "TARGET_H": 1920,
+            "DIVIDER_H": 160,
+            "DIVIDER_PATH": work / "divider.png",
+            "FONT_PATH": work / "missing.ttf",
+            "FFMPEG_EXE": "ffmpeg",
+            "FFMPEG_THREADS": 1,
+            "SUB_SIZE": 128,
+            "SUB_COLOR": "&H00FFFFFF",
+            "SUB_BORDER": "&H00000000",
+            "SUB_BORDER_WIDTH": 12,
+            "SUB_MAX_WORDS": 1,
+            "JUST_CHATTING_RETENTION_DIR": work / "retention",
+            "JUST_CHATTING_VIDEO_EXTENSIONS": {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".ts", ".m2ts"},
+        })
 
         main_video = work / "main.mp4"
         gameplay = work / "retention.mp4"
@@ -69,10 +116,11 @@ def main():
             "-frames:v", "1", str(divider),
         ])
 
-        ttca.create_ass_file([], ass, 1080, 1920, 900)
-        ttca.prepare_fonts_dir()
+        ass_path = ass
+        ns["create_ass_file"]([], ass_path, 1080, 1920, 900)
+        ns["prepare_fonts_dir"]()
 
-        cmd = ttca.build_ffmpeg_cmd(
+        cmd = ns["build_ffmpeg_cmd"](
             main_video,
             output,
             None,
@@ -87,19 +135,26 @@ def main():
         )
         run(cmd, cwd=work)
 
-        width, height, fps, duration = ttca.get_video_info(output)
-        assert (width, height) == (1080, 1920), (width, height)
+        probe = run([
+            "ffprobe", "-v", "error",
+            "-show_entries", "stream=width,height",
+            "-show_entries", "format=duration",
+            "-of", "default=nw=1",
+            str(output),
+        ]).stdout
+        assert "width=1080" in probe
+        assert "height=1920" in probe
+        duration_line = next(line for line in probe.splitlines() if line.startswith("duration="))
+        duration = float(duration_line.split("=", 1)[1])
         assert 2.5 <= duration <= 3.2, duration
 
-        # Categoría API y selección aleatoria de retención.
-        ttca.JUST_CHATTING_RETENTION_DIR = work / "retention"
-        ttca.JUST_CHATTING_RETENTION_DIR.mkdir()
-        retained = ttca.JUST_CHATTING_RETENTION_DIR / "game.mp4"
-        retained.write_bytes(gameplay.read_bytes())
-        assert ttca.is_just_chatting_clip(
+        ns["JUST_CHATTING_RETENTION_DIR"].mkdir()
+        retained = ns["JUST_CHATTING_RETENTION_DIR"] / "game.mp4"
+        shutil.copy2(gameplay, retained)
+        assert ns["is_just_chatting_clip"](
             {"category": {"id": 15, "name": "Just Chatting", "slug": "just-chatting"}}
         )
-        assert ttca.pick_just_chatting_gameplay() == retained
+        assert ns["pick_just_chatting_gameplay"]() == retained
 
     print("TTCA smoke tests: OK")
 
