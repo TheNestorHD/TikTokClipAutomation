@@ -17,6 +17,7 @@ FUNCTIONS = {
     "is_just_chatting_clip",
     "pick_just_chatting_gameplay",
     "just_chatting_top_height",
+    "_format_transcription_for_omni",
     "prepare_fonts_dir",
     "create_ass_file",
     "build_ffmpeg_cmd",
@@ -39,6 +40,18 @@ def run(cmd, cwd=None):
 
 def load_functions():
     source = SOURCE.read_text(encoding="utf-8")
+
+    # Contratos de arquitectura: Whisper es el único transcriptor y las
+    # operaciones externas/intermedias deben poder quedar bloqueadas tras un crash.
+    assert "def transcribe_audio_with_omni" not in source
+    assert "TRANSCRIPTION_MODEL" not in source
+    assert "Fallback directo a Nemotron Omni" not in source
+    assert "upload_interrupted" in source
+    assert ".part.mp4" in source
+    assert "TÍTULO ORIGINAL DEL CLIP EN KICK:" in source
+    assert "CATEGORÍA DEL CLIP:" in source
+    assert "TRANSCRIPCIÓN GENERADA EXCLUSIVAMENTE POR WHISPER:" in source
+
     tree = ast.parse(source, filename=str(SOURCE))
     selected = [
         node
@@ -72,6 +85,13 @@ def main():
         )
     )
     assert [w["word"] for w in parsed] == ["hola", "mundo"]
+
+    formatted = namespace["_format_transcription_for_omni"]([
+        {"word": "hola", "start": 1.25, "end": 1.60},
+        {"word": "mundo", "start": 1.61, "end": 2.05},
+    ])
+    assert "[001.25-001.60] hola" in formatted
+    assert "[001.61-002.05] mundo" in formatted
 
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
