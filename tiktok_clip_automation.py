@@ -358,6 +358,35 @@ def _coerce_text(value) -> str:
     return str(value)
 
 
+def _clip_channel_name(clip: dict | None) -> str:
+    """Obtiene un nombre de canal legible desde los formatos de Kick conocidos."""
+    clip = clip or {}
+    channel = clip.get("channel")
+
+    if isinstance(channel, dict):
+        for key in ("username", "slug", "name"):
+            value = channel.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        user = channel.get("user")
+        if isinstance(user, dict):
+            for key in ("username", "slug", "name"):
+                value = user.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+    if isinstance(channel, str) and channel.strip():
+        return channel.strip()
+
+    for key in ("channel_name", "channelName", "username", "slug"):
+        value = clip.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    return str(KICK_CHANNEL or "canal").strip()
+
+
 def _clip_category_name(clip: dict | None) -> str:
     """Obtiene el nombre de la categoría de Kick sin asumir un único formato de API."""
     clip = clip or {}
@@ -697,15 +726,49 @@ def _channel_hashtag(channel: str) -> str:
     return f"#{cleaned}" if cleaned else "#kick"
 
 
-def _ensure_omni_identity_hashtags(caption: str, channel: str) -> str:
+def _ensure_omni_identity_hashtags(caption: str, channel: str, max_length: int = 220) -> str:
+    """Normaliza el caption IA y evita hashtags patológicos o captions >220 caracteres."""
+    import re
+
     caption = " ".join((caption or "").replace("\n", " ").split()).strip()
-    channel_tag = _channel_hashtag(channel)
+    channel_name = str(channel or "").strip()
+    channel_tag = _channel_hashtag(channel_name)
+
+    clean_tokens = []
+    for token in caption.split():
+        if token.startswith("#"):
+            if len(token) > 40 or not re.fullmatch(r"#[A-Za-z0-9_]+", token):
+                continue
+        clean_tokens.append(token)
+    caption = " ".join(clean_tokens).strip()
+
+    required_tags = [channel_tag] if channel_tag.lower() == "#kick" else [channel_tag, "#kick"]
     lower = caption.lower()
-    if channel_tag.lower() not in lower:
-        caption = f"{caption} {channel_tag}".strip()
-    if "#kick" not in lower:
-        caption = f"{caption} #kick".strip()
-    return " ".join(caption.split())
+    for tag in required_tags:
+        if tag.lower() not in lower:
+            candidate = f"{caption} {tag}".strip()
+            if len(candidate) <= max_length:
+                caption = candidate
+                lower = caption.lower()
+
+    if len(caption) <= max_length:
+        return caption
+
+    hashtags = [tok for tok in caption.split() if tok.startswith("#")]
+    body = [tok for tok in caption.split() if not tok.startswith("#")]
+    while body and len(" ".join(body + hashtags)) > max_length:
+        body.pop()
+
+    result = " ".join(body + hashtags).strip()
+    if len(result) <= max_length:
+        return result
+
+    safe = []
+    for tag in required_tags:
+        candidate = " ".join(safe + [tag]).strip()
+        if len(candidate) <= max_length:
+            safe.append(tag)
+    return " ".join(safe)
 
 
 def _format_transcription_for_omni(words: list[dict]) -> str:
@@ -838,6 +901,11 @@ Cuando TIKTOK_CAPTION_MODE no sea "omni", "caption" puede ser una cadena vacía.
 No agregues Markdown ni texto fuera del JSON.
 """
         prompt = prompt.replace("__CAPTION_RULES__", caption_rules)
+        print(
+            f"     Contexto Omni: canal={channel_for_prompt!r} | "
+            f"categoría={category_for_prompt!r} | "
+            f"palabras Whisper={len(transcription_words or [])}"
+        )
 
         headers = {
             "Authorization": f"Bearer {NVIDIA_API_KEY}",
@@ -927,12 +995,7 @@ No agregues Markdown ni texto fuera del JSON.
                 caption = _ensure_omni_identity_hashtags(
                     caption,
                     channel_for_prompt,
-                )
-                if len(caption) > 220:
-                    caption = caption[:220].rstrip()
-                caption = _ensure_omni_identity_hashtags(
-                    caption,
-                    channel_for_prompt,
+                    max_length=220,
                 )
 
                 print(
@@ -2378,11 +2441,7 @@ def process_one_clip(
         or video_path.stem
         or "Nuevo clip"
     )
-    clip_channel = (
-        (clip_metadata or {}).get("channel")
-        or KICK_CHANNEL
-        or "canal"
-    )
+    clip_channel = _clip_channel_name(clip_metadata)
     clip_category = category_name or "Desconocida"
     suggested = suggest_trim_llm(
         duration,
@@ -3089,7 +3148,7 @@ def _register_clip_metadata(clip: dict, registry: dict, **extra):
         "stream_identity": _clip_stream_identity(clip),
         "duration": duration,
         "category_name": _clip_category_name(clip),
-        "channel": clip.get("channel") or KICK_CHANNEL,
+        "channel": _clip_channel_name(clip),
         "platform": clip.get("platform") or "Kick",
     }
     fields.update(extra)
@@ -3539,7 +3598,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     **clip,
                     "id": clip_id,
                     "category_name": _clip_category_name(clip),
-                    "channel": clip.get("channel") or KICK_CHANNEL,
+                    "channel": _clip_channel_name(clip),
                     "platform": clip.get("platform") or "Kick",
                     "local_path": str(path),
                 })
@@ -3598,7 +3657,11 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     "title": record.get("title") or local_path.stem,
                     "created_at": record.get("created_at"),
                     "category_name": record.get("category_name") or "",
-                    "channel": record.get("channel") or KICK_CHANNEL,
+                    "channel": (
+                        record.get("channel")
+                        if isinstance(record.get("channel"), str)
+                        else _clip_channel_name(record)
+                    ),
                     "platform": record.get("platform") or "Kick",
                     "local_path": str(local_path),
                 })
@@ -4255,11 +4318,22 @@ def _subir_video_intento(
                 desc.click(timeout=5000, force=True)
 
             time.sleep(0.4)
-            page.keyboard.press("Control+A")
-            page.keyboard.press("Backspace")
-            time.sleep(0.3)
-            desc.type(caption, delay=20)
-            time.sleep(1.2)
+
+            # Draft.js/TikTok puede tardar demasiado con type() carácter por carácter.
+            # fill() funciona directamente sobre contenteditable y evita ese timeout.
+            try:
+                desc.fill(caption, timeout=10000)
+            except Exception as fill_error:
+                print(
+                    f"  ⚠️  fill() falló: {fill_error}; "
+                    "usando teclado como fallback..."
+                )
+                desc.click(timeout=5000, force=True)
+                page.keyboard.press("Control+A")
+                page.keyboard.press("Backspace")
+                page.keyboard.insert_text(caption)
+
+            time.sleep(0.8)
             cerrar_popups(page)
 
             if save_draft:
