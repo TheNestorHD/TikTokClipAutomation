@@ -1626,21 +1626,122 @@ def build_ffmpeg_cmd(
     orig_w: int,
     orig_h: int,
     ass_path: Path,
-    cam_h: int,
+    cam_h: int | None,
     start_sec: float = 0.0,
     end_sec: float = None,
+    just_chatting: bool = False,
+    gameplay_path: Path | None = None,
 ):
     """
     Construye el comando FFmpeg completo.
 
-    Con divisor:
-        [facecam] + [divisor 1080x160] + [gameplay]
+    Modo normal:
+        [facecam] + [divisor] + [gameplay]
 
-    Sin divisor:
-        [facecam] + [gameplay ocupando todo el espacio restante]
+    Just Chatting:
+        [clip completo] + [divisor] + [gameplay aleatorio de assets/]
 
     + subtítulos ASS + trim opcional.
     """
+    if just_chatting:
+        if gameplay_path is None or not gameplay_path.exists():
+            raise FileNotFoundError("No hay gameplay de fondo disponible para Just Chatting.")
+
+        has_divider = DIVIDER_PATH.exists()
+        effective_divider_h = DIVIDER_H if has_divider else 0
+        top_h = just_chatting_top_height(orig_w, orig_h)
+        bottom_h = TARGET_H - top_h - effective_divider_h
+
+        if bottom_h < 200:
+            top_h = TARGET_H - effective_divider_h - 400
+            top_h -= top_h % 2
+            bottom_h = TARGET_H - top_h - effective_divider_h
+
+        top_h = max(2, top_h - (top_h % 2))
+        bottom_h = max(2, bottom_h - (bottom_h % 2))
+
+        prepare_fonts_dir()
+        ass_name = ass_path.name
+        fonts_name = "_fonts_temp"
+
+        top_filter = (
+            f"[0:v]scale={TARGET_W}:{top_h}:force_original_aspect_ratio=decrease,"
+            f"pad={TARGET_W}:{top_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1[top]"
+        )
+
+        gameplay_index = 2 if has_divider else 1
+        gameplay_filter = (
+            f"[{gameplay_index}:v]"
+            f"scale={TARGET_W}:{bottom_h}:force_original_aspect_ratio=increase,"
+            f"crop={TARGET_W}:{bottom_h},setsar=1[game]"
+        )
+
+        if has_divider:
+            filter_complex = (
+                f"{top_filter};"
+                f"[1:v]scale={TARGET_W}:{DIVIDER_H},setsar=1[div];"
+                f"{gameplay_filter};"
+                f"[top][div][game]vstack=inputs=3,setsar=1,format=yuv420p[base];"
+                f"[base]ass={ass_name}:fontsdir={fonts_name}[outv]"
+            )
+        else:
+            print(
+                "  ℹ️  Sin divisor: el gameplay ocupará automáticamente "
+                f"el espacio restante ({bottom_h}px)."
+            )
+            filter_complex = (
+                f"{top_filter};"
+                f"{gameplay_filter};"
+                f"[top][game]vstack=inputs=2,setsar=1,format=yuv420p[base];"
+                f"[base]ass={ass_name}:fontsdir={fonts_name}[outv]"
+            )
+
+        cmd = [
+            (FFMPEG_EXE or "ffmpeg"), "-y",
+            "-hide_banner",
+        ]
+
+        trim_duration = None
+        if end_sec is not None and end_sec > start_sec:
+            trim_duration = end_sec - start_sec
+
+        if start_sec and start_sec > 0:
+            cmd += ["-ss", f"{start_sec:.3f}"]
+        if trim_duration is not None:
+            cmd += ["-t", f"{trim_duration:.3f}"]
+
+        cmd += ["-i", str(video_path)]
+        if has_divider:
+            cmd += ["-i", str(DIVIDER_PATH)]
+
+        # Loops para cubrir toda la duración del clip principal.
+        cmd += ["-stream_loop", "-1", "-i", str(gameplay_path)]
+
+        cmd += [
+            "-filter_complex", filter_complex,
+            "-map", "[outv]",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "18",
+            "-profile:v", "high",
+            "-level", "4.2",
+            "-pix_fmt", "yuv420p",
+            "-threads", str(FFMPEG_THREADS),
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-ar", "44100",
+            "-ac", "2",
+            "-movflags", "+faststart",
+            "-shortest",
+        ]
+
+        if trim_duration is not None:
+            cmd += ["-t", f"{trim_duration:.3f}"]
+
+        cmd.append(str(output_path))
+        return cmd
+
     fx, fy, fw, fh = facecam_box
 
     fx = max(0, min(int(fx), orig_w - 2))
