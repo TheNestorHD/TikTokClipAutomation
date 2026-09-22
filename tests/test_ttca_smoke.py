@@ -57,6 +57,9 @@ def load_functions():
     assert 'btn.wait_for(state="visible", timeout=12000)' not in source
     assert 'draft_selector = \'button[data-e2e="save_draft_button"]\'' in source
     assert 'draft_btn.dispatch_event("click", timeout=2000)' in source
+    assert 'draft_btn.click(timeout=4000, force=True, no_wait_after=True)' in source
+    assert 'save_network_events = []' in source
+    assert 'REQUEST FAILED' in source
     assert 'draft_btn.evaluate("(el) => el.click()")' in source
 
     tree = ast.parse(source, filename=str(SOURCE))
