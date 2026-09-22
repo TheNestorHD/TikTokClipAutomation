@@ -81,7 +81,9 @@ DEFAULT_RELATIVE_PATHS = {
 
 JUST_CHATTING_CATEGORY = "just chatting"
 JUST_CHATTING_MODE_ENABLED = env_bool("JUST_CHATTING_MODE_ENABLED", True)
-KIMI_WHISPER_FALLBACK_ENABLED = env_bool("KIMI_WHISPER_FALLBACK_ENABLED", True)
+TRANSCRIPTION_MODEL = env_value("TRANSCRIPTION_MODEL", "whisper").strip().lower()
+if TRANSCRIPTION_MODEL not in {"whisper", "omni"}:
+    TRANSCRIPTION_MODEL = "whisper"
 JUST_CHATTING_RETENTION_DIR = resolve_path(
     env_value(
         "JUST_CHATTING_RETENTION_DIR",
@@ -1600,7 +1602,7 @@ def _transcribe_with_faster_whisper(audio_path: Path) -> tuple[list[dict], str]:
     return _clean_transcribed_words(words), model_name
 
 
-def _parse_kimi_transcription_response(response_text: str) -> list[dict]:
+def _parse_transcription_response(response_text: str) -> list[dict]:
     """
     Convierte la respuesta de Kimi a la misma estructura que usa Whisper:
     [{"word": "...", "start": 0.0, "end": 0.5, "probability": None}, ...]
@@ -1682,83 +1684,13 @@ def _parse_kimi_transcription_response(response_text: str) -> list[dict]:
     return _clean_transcribed_words(words)
 
 
-def transcribe_audio_with_kimi(audio_path: Path) -> list[dict]:
-    """
-    Fallback separado de Whisper. Envía el audio a Kimi y exige timestamps.
-    La API de NVIDIA documenta actualmente Kimi-K3 como texto + imagen; por eso
-    un rechazo de audio se trata como un fallback no disponible, sin tumbar el pipeline.
-    """
-    import base64
-    import requests
-
-    print("  🧠 Fallback de subtítulos: enviando audio a Kimi...")
-    audio_bytes = audio_path.read_bytes()
-    b64 = base64.b64encode(audio_bytes).decode("utf-8")
-
-    prompt = """Transcribí TODO el audio del streamer en español rioplatense.
-Devolvé SOLO JSON válido con esta estructura exacta:
-{"words":[{"word":"hola","start":0.00,"end":0.42},{"word":"mundo","start":0.42,"end":0.88}]}
-Usá segundos desde el inicio del audio.
-Cada elemento debe ser una palabra o token corto con timestamps.
-No agregues Markdown, comentarios ni texto fuera del JSON.
-"""
-
-    headers = {
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-
-    payload = {
-        "model": FACE_KIMI_MODEL,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "audio_url",
-                    "audio_url": {
-                        "url": f"data:audio/wav;base64,{b64}",
-                    },
-                },
-            ],
-        }],
-        "max_tokens": 4096,
-        "temperature": 0.0,
-        "stream": False,
-    }
-
-    response = requests.post(
-        NVIDIA_API_URL,
-        headers=headers,
-        json=payload,
-        timeout=FACE_KIMI_TIMEOUT,
-    )
-
-    if response.status_code != 200:
-        detail = _coerce_text(response.text).replace("\n", " ")
-        raise RuntimeError(
-            f"Kimi no aceptó el audio (HTTP {response.status_code}): {detail[:400]}"
-        )
-
-    data = response.json()
-    message = data.get("choices", [{}])[0].get("message", {})
-    response_text = _coerce_text(message.get("content"))
-
-    words = _parse_kimi_transcription_response(response_text)
-    if not words:
-        raise RuntimeError("Kimi respondió, pero no devolvió subtítulos parseables.")
-
-    print(f"  ✅ Kimi fallback: {len(words)} palabras detectadas")
-    return words
-
 
 def transcribe_audio_with_omni(audio_path: Path) -> list[dict]:
-    """Último fallback de subtítulos: Nemotron Omni recibe audio directamente."""
+    """Transcribe audio directamente con Nemotron Omni."""
     import base64
     import requests
 
-    print("  🤖 Fallback adicional: enviando audio a Nemotron Omni...")
+    print("  🤖 Transcripción: Nemotron Omni (audio)...")
     audio_bytes = audio_path.read_bytes()
     b64 = base64.b64encode(audio_bytes).decode("utf-8")
 
@@ -1809,7 +1741,7 @@ No agregues Markdown, comentarios ni texto fuera del JSON.
 
     data = response.json()
     message = data.get("choices", [{}])[0].get("message", {})
-    words = _parse_kimi_transcription_response(
+    words = _parse_transcription_response(
         _coerce_text(message.get("content"))
     )
     if not words:
@@ -1820,17 +1752,23 @@ No agregues Markdown, comentarios ni texto fuera del JSON.
 
 
 def transcribe_video(video_path: Path):
-    """Transcribe con Whisper; si falla por completo, usa Kimi como fallback opcional."""
+    """
+    Transcribe según la configuración:
+    - whisper (predeterminado): whisper.cpp/faster-whisper; si falla completamente, Omni.
+    - omni: Nemotron Omni recibe el audio directamente.
+    """
     audio_path = None
-    transcribe_error = None
 
     try:
         try:
             audio_path = _extract_audio_for_whisper(video_path)
-            print("     Audio pre-procesado (mono 16k + loudnorm)")
+            print("     Audio preparado (mono 16k + loudnorm)")
         except Exception as e:
-            print(f"     ⚠️  No se pudo pre-procesar audio ({e})")
+            print(f"  ⚠️  No se pudo preparar el audio ({e})")
             audio_path = video_path
+
+        if TRANSCRIPTION_MODEL == "omni":
+            return transcribe_audio_with_omni(audio_path)
 
         try:
             use_cpp = (
@@ -1844,13 +1782,13 @@ def transcribe_video(video_path: Path):
 
             if use_cpp:
                 try:
-                    print("  🚀 Whisper backend: whisper.cpp")
+                    print("  🚀 Transcripción: Whisper.cpp")
                     words, model_name = _transcribe_with_whisper_cpp(audio_path)
                 except Exception as e:
-                    print(f"  ⚠️  whisper.cpp falló: {e}. Fallback a faster-whisper...")
+                    print(f"  ⚠️  Whisper.cpp falló: {e}. Fallback a faster-whisper...")
                     words, model_name = _transcribe_with_faster_whisper(audio_path)
             else:
-                print("  🚀 Whisper backend: faster-whisper")
+                print("  🚀 Transcripción: faster-whisper")
                 words, model_name = _transcribe_with_faster_whisper(audio_path)
 
             preview = " ".join(w["word"] for w in words[:25])
@@ -1859,31 +1797,18 @@ def transcribe_video(video_path: Path):
             print(f"  ✅ {len(words)} palabras detectadas ({model_name})")
             return words
 
-        except Exception as e:
-            transcribe_error = e
-            print(f"  ❌ Whisper falló completamente: {e}")
-
-            if not KIMI_WHISPER_FALLBACK_ENABLED:
-                raise
-
+        except Exception as whisper_error:
+            print(f"  ❌ Whisper falló completamente: {whisper_error}")
+            print("  → Fallback directo a Nemotron Omni...")
             fallback_audio = audio_path
             if fallback_audio is None or fallback_audio == video_path:
                 fallback_audio = _extract_audio_for_whisper(video_path)
 
-            try:
-                words = transcribe_audio_with_kimi(fallback_audio)
-                preview = " ".join(w["word"] for w in words[:25])
-                if preview:
-                    print(f"     Preview Kimi: {preview}{'...' if len(words) > 25 else ''}")
-                return words
-            except Exception as kimi_error:
-                print(f"  ⚠️  Kimi no pudo transcribir el audio: {kimi_error}")
-                print("  → Intentando Nemotron Omni como último fallback de subtítulos...")
-                words = transcribe_audio_with_omni(fallback_audio)
-                preview = " ".join(w["word"] for w in words[:25])
-                if preview:
-                    print(f"     Preview Omni: {preview}{'...' if len(words) > 25 else ''}")
-                return words
+            words = transcribe_audio_with_omni(fallback_audio)
+            preview = " ".join(w["word"] for w in words[:25])
+            if preview:
+                print(f"     Preview Omni: {preview}{'...' if len(words) > 25 else ''}")
+            return words
 
     finally:
         if audio_path is not None and audio_path != video_path:
@@ -1891,7 +1816,6 @@ def transcribe_video(video_path: Path):
                 audio_path.unlink(missing_ok=True)
             except Exception:
                 pass
-
 
 
 
@@ -6112,7 +6036,7 @@ def reload_config_from_env():
     global TIKTOK_PROCESSING_TIMEOUT_SECONDS, TIKTOK_CONFIRM_TIMEOUT_SECONDS
     global TIKTOK_UPLOAD_CHECK_SECONDS, FFMPEG_PRIORITY, FFMPEG_THREADS
     global TIKTOK_CAPTION_MODE, TIKTOK_CAPTION_TEMPLATE, TIKTOK_HASHTAGS, TIKTOK_UPLOAD_REGISTRY
-    global JUST_CHATTING_MODE_ENABLED, JUST_CHATTING_RETENTION_DIR, KIMI_WHISPER_FALLBACK_ENABLED
+    global JUST_CHATTING_MODE_ENABLED, JUST_CHATTING_RETENTION_DIR, TRANSCRIPTION_MODEL
 
     CLIPS_DIR = resolve_path(env_value("CLIPS_DIR", DEFAULT_RELATIVE_PATHS["CLIPS_DIR"]))
     OUTPUT_DIR = resolve_path(env_value("OUTPUT_DIR", DEFAULT_RELATIVE_PATHS["OUTPUT_DIR"]))
@@ -6220,7 +6144,9 @@ def reload_config_from_env():
     )
 
     JUST_CHATTING_MODE_ENABLED = env_bool("JUST_CHATTING_MODE_ENABLED", True)
-    KIMI_WHISPER_FALLBACK_ENABLED = env_bool("KIMI_WHISPER_FALLBACK_ENABLED", True)
+    TRANSCRIPTION_MODEL = env_value("TRANSCRIPTION_MODEL", "whisper").strip().lower()
+    if TRANSCRIPTION_MODEL not in {"whisper", "omni"}:
+        TRANSCRIPTION_MODEL = "whisper"
     JUST_CHATTING_RETENTION_DIR = resolve_path(
         env_value(
             "JUST_CHATTING_RETENTION_DIR",
