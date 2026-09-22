@@ -3418,6 +3418,30 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     )
                     continue
 
+                # Revalidar el estado justo antes de reclamar el clip.
+                # El cálculo de miniatura/pHash puede tardar y el processor
+                # podría haber terminado mientras tanto. Sin esta comprobación,
+                # el watcher puede sobrescribir un awaiting_tiktok recién escrito
+                # con queued y crear un bucle de redescarga/reprocesamiento.
+                with PIPELINE_REGISTRY_LOCK:
+                    latest_record = registry.get(clip_id, {})
+                    latest_status = latest_record.get("status")
+
+                if latest_status in {
+                    "known",
+                    "queued",
+                    "downloading",
+                    "downloaded",
+                    "processing",
+                    "processed",
+                    "awaiting_tiktok",
+                    "duplicate",
+                }:
+                    continue
+
+                if latest_status == "failed" and not _clip_is_retryable(latest_record):
+                    continue
+
                 _register_clip_metadata(
                     clip,
                     registry,
@@ -4282,6 +4306,28 @@ class TikTokUploadManager:
             "queued",
             "uploading",
         }:
+            # El Reel puede haber sido descubierto antes de que el watcher
+            # terminara de procesar el clip original. En ese caso asociamos
+            # ahora el item de TikTok con el clip del pipeline para que, al
+            # confirmar el borrador/publicación, el registro principal también
+            # pase a completed.
+            if clip:
+                pipeline_clip_id = str(clip.get("id") or "").strip()
+                if pipeline_clip_id and not existing.get("pipeline_clip_id"):
+                    existing["pipeline_clip_id"] = pipeline_clip_id
+                    existing["title"] = clip.get("title") or existing.get("title") or video_path.stem
+                    existing["caption"] = _caption_for_clip(clip)
+                    existing["caption_source"] = (
+                        "omni"
+                        if TIKTOK_CAPTION_MODE == "omni"
+                        and clip.get("generated_caption")
+                        else existing.get("caption_source", "template")
+                    )
+                    self.save_state(state)
+                    self.log(
+                        f"🔗 TikTok: Reel existente asociado al clip {pipeline_clip_id} → "
+                        f"{video_path.name}"
+                    )
             return False
 
         clip_data = clip or {"title": video_path.stem}
@@ -5988,16 +6034,42 @@ class TikTokClipAutomationApp:
         if self.tiktok_manager is None:
             self.tiktok_manager = TikTokUploadManager(log_callback=self.log)
             self.tiktok_manager.start()
+
         queued = self.tiktok_manager.enqueue(output_path, clip)
+
+        # Puede existir un item de TikTok creado por discover_existing_reels()
+        # antes de que el watcher terminara de procesar este clip. enqueue()
+        # lo asocia con pipeline_clip_id cuando está pendiente; acá además
+        # sincronizamos cualquier estado terminal que ya exista.
         if not queued:
             state = self.tiktok_manager.load_state()
             item = state.get("items", {}).get(str(output_path.resolve()))
-            if item and item.get("status") in {"uploaded", "draft_saved", "failed"}:
-                _sync_pipeline_from_tiktok(
-                    item,
-                    item.get("status"),
-                    item.get("last_error"),
-                )
+
+            if item:
+                pipeline_clip_id = str(clip.get("id") or "").strip()
+                if pipeline_clip_id and not item.get("pipeline_clip_id"):
+                    item["pipeline_clip_id"] = pipeline_clip_id
+                    item["title"] = clip.get("title") or item.get("title") or output_path.stem
+                    item["caption"] = _caption_for_clip(clip)
+                    item["caption_source"] = (
+                        "omni"
+                        if TIKTOK_CAPTION_MODE == "omni"
+                        and clip.get("generated_caption")
+                        else item.get("caption_source", "template")
+                    )
+                    self.tiktok_manager.save_state(state)
+                    self.log(
+                        f"🔗 TikTok: item existente vinculado al clip "
+                        f"{pipeline_clip_id} → {output_path.name}"
+                    )
+
+                if item.get("status") in {"uploaded", "draft_saved", "failed"}:
+                    _sync_pipeline_from_tiktok(
+                        item,
+                        item.get("status"),
+                        item.get("last_error"),
+                    )
+
         self.root.after(0, self._refresh_tiktok_queue)
         return queued
 
