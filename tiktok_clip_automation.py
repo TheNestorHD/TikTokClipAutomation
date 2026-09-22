@@ -2619,6 +2619,34 @@ PIPELINE_PROCESS_PENDING_STATUSES = {
 }
 
 
+def _sync_pipeline_from_tiktok(item: dict, terminal_status: str, error: str | None = None):
+    """Propaga el estado terminal de TikTok al registro del clip."""
+    clip_id = str(item.get("pipeline_clip_id") or "").strip()
+    if not clip_id:
+        return
+
+    registry = PIPELINE_REGISTRY
+    if registry is None:
+        registry = load_clip_registry()
+
+    fields = {
+        "status": "completed" if terminal_status in {"uploaded", "draft_saved"} else "failed",
+        "last_error": error,
+        "last_attempt_at": time.time(),
+    }
+
+    if terminal_status in {"uploaded", "draft_saved"}:
+        fields.update({
+            "completed_at": datetime.now().isoformat(),
+            "failure_stage": None,
+        })
+    else:
+        fields["failure_stage"] = "tiktok"
+
+    with PIPELINE_REGISTRY_LOCK:
+        update_clip_registry(registry, clip_id, **fields)
+
+
 def _pipeline_stats() -> dict:
     """Calcula indicadores persistentes del pipeline sin depender de Queue.qsize()."""
     registry = PIPELINE_REGISTRY if PIPELINE_REGISTRY is not None else load_clip_registry()
@@ -4043,9 +4071,11 @@ class TikTokUploadManager:
 
         clip_data = clip or {"title": video_path.stem}
         title = clip_data.get("title") or video_path.stem
+        pipeline_clip_id = str(clip_data.get("id") or "").strip()
         items[key] = {
             "video_path": key,
             "title": title,
+            "pipeline_clip_id": pipeline_clip_id or None,
             "caption": _caption_for_clip(clip_data),
             "caption_source": (
                 "omni"
@@ -4169,6 +4199,11 @@ class TikTokUploadManager:
                 item["last_error"] = None
                 item["scheduled_at"] = None
                 self.save_state(state)
+                _sync_pipeline_from_tiktok(
+                    item,
+                    "draft_saved" if save_draft else "uploaded",
+                    None,
+                )
                 result_text = "guardado en borradores" if save_draft else "publicado"
                 self.log(f"✅ TikTok: {result_text} → {video_path.name}")
             else:
@@ -4182,6 +4217,7 @@ class TikTokUploadManager:
                         else "La publicación no pudo confirmarse."
                     )
                 self.save_state(state)
+                _sync_pipeline_from_tiktok(item, "failed", item.get("last_error"))
                 action_text = "guardar el borrador" if save_draft else "la publicación"
                 self.log(
                     f"❌ TikTok: falló {video_path.name} al {action_text}. "
@@ -5624,8 +5660,9 @@ class TikTokClipAutomationApp:
         if self.tiktok_manager is None:
             self.tiktok_manager = TikTokUploadManager(log_callback=self.log)
             self.tiktok_manager.start()
-        self.tiktok_manager.enqueue(output_path, clip)
+        queued = self.tiktok_manager.enqueue(output_path, clip)
         self.root.after(0, self._refresh_tiktok_queue)
+        return queued
 
     def stop_pipeline(self):
         self.stop_event.set()
