@@ -4343,42 +4343,83 @@ def _subir_video_intento(
                 print("→ Buscando botón Guardar borrador...")
 
                 draft_selectors = [
+                    # Selector estable expuesto por TikTok Studio en el DOM.
+                    'button[data-e2e="save_draft_button"]:visible',
                     'button[data-e2e="save_draft_button"]',
-                    'div[data-e2e="save_draft_button"][role="button"]',
-                    'button:has-text("Save draft")',
-                    'button:has-text("Save Draft")',
-                    'button:has-text("Guardar borrador")',
-                    'div[role="button"]:has-text("Save draft")',
-                    'div[role="button"]:has-text("Guardar borrador")',
+                    'div[data-e2e="save_draft_button"][role="button"]:visible',
+                    'button:has-text("Save draft"):visible',
+                    'button:has-text("Save Draft"):visible',
+                    'button:has-text("Guardar borrador"):visible',
+                    'div[role="button"]:has-text("Save draft"):visible',
+                    'div[role="button"]:has-text("Guardar borrador"):visible',
                 ]
 
                 clicked = False
                 for sel in draft_selectors:
                     try:
                         btn = page.locator(sel).first
-                        if btn.count() > 0 and btn.is_visible(timeout=2500):
-                            disabled = (
-                                btn.get_attribute("disabled")
-                                or btn.get_attribute("aria-disabled")
+
+                        # is_visible() puede devolver False mientras TikTok termina
+                        # de montar/hidratar el footer de acciones. wait_for() sí
+                        # espera explícitamente a que el nodo llegue a visible.
+                        btn.wait_for(state="visible", timeout=12000)
+
+                        disabled_values = {
+                            str(btn.get_attribute("disabled") or "").lower(),
+                            str(btn.get_attribute("aria-disabled") or "").lower(),
+                            str(btn.get_attribute("data-disabled") or "").lower(),
+                        }
+                        clases = (btn.get_attribute("class") or "").lower()
+                        loading = str(btn.get_attribute("data-loading") or "").lower()
+
+                        if (
+                            {"true", "1"} & disabled_values
+                            or "disabled" in clases
+                            or loading == "true"
+                        ):
+                            continue
+
+                        btn.scroll_into_view_if_needed(timeout=5000)
+                        time.sleep(0.4)
+
+                        try:
+                            btn.click(timeout=7000)
+                        except Exception:
+                            # TikTok puede mantener una capa visual encima aunque
+                            # el botón ya sea el correcto; el nodo sigue siendo
+                            # clickeable mediante DOM.
+                            btn.evaluate("el => el.click()")
+
+                        print(f"  → Click correcto en Guardar borrador: {sel}")
+                        clicked = True
+                        break
+                    except Exception as exc:
+                        if "save_draft_button" in sel and "visible" in sel:
+                            print(
+                                f"  ⚠️  Botón exacto todavía no visible: "
+                                f"{str(exc).splitlines()[0]}"
                             )
-                            clases = (btn.get_attribute("class") or "").lower()
-                            if disabled in ["true", "True", True] or "disabled" in clases:
-                                continue
-
-                            btn.scroll_into_view_if_needed()
-                            time.sleep(0.5)
-                            try:
-                                btn.click(timeout=5000)
-                            except Exception:
-                                btn.evaluate("el => el.click()")
-
-                            print(f"  → Click correcto en Guardar borrador: {sel}")
-                            clicked = True
-                            break
-                    except Exception:
                         continue
 
                 if not clicked:
+                    # Diagnóstico final: el atributo data-e2e puede existir en el
+                    # DOM aunque otra capa haya impedido el selector :visible.
+                    try:
+                        exact = page.locator('button[data-e2e="save_draft_button"]').first
+                        exact.wait_for(state="attached", timeout=5000)
+                        exact_count = page.locator(
+                            'button[data-e2e="save_draft_button"]'
+                        ).count()
+                        print(
+                            f"  ⚠️  TikTok expone save_draft_button en DOM "
+                            f"({exact_count} coincidencia(s)), pero no pudo hacerse click."
+                        )
+                    except Exception:
+                        print(
+                            "  ⚠️  TikTok no expone save_draft_button en el DOM "
+                            "en este momento."
+                        )
+
                     print("✗ No se encontró el botón Guardar borrador")
                     page.screenshot(path="error_no_save_draft_button.png")
                     return False
