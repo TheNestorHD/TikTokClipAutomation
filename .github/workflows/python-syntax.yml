@@ -17,6 +17,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install FFmpeg for smoke tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
       - name: Compile Python files
         run: |
           python -m py_compile tiktok_clip_automation.py
