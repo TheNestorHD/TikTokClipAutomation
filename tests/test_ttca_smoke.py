@@ -53,6 +53,8 @@ def load_functions():
     assert "TÍTULO ORIGINAL DEL CLIP EN KICK:" in source
     assert "CATEGORÍA DEL CLIP:" in source
     assert "TRANSCRIPCIÓN GENERADA EXCLUSIVAMENTE POR WHISPER:" in source
+    assert 'button[data-e2e="save_draft_button"]:visible' in source
+    assert 'btn.wait_for(state="visible", timeout=12000)' in source
 
     tree = ast.parse(source, filename=str(SOURCE))
     selected = [
