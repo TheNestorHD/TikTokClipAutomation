@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.4.5"
+APP_VERSION = "0.4.6"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -4322,19 +4322,47 @@ def _subir_video_intento(
 
             time.sleep(0.4)
 
-            # Draft.js/TikTok puede tardar demasiado con type() carácter por carácter.
-            # fill() funciona directamente sobre contenteditable y evita ese timeout.
+            # El editor de TikTok es Draft.js/contenteditable. Evitamos fill():
+            # visualmente puede dejar el texto correcto pero no siempre reproduce
+            # el flujo de eventos que el estado React del editor espera para habilitar
+            # acciones posteriores como Save draft.
+            desc.click(timeout=5000, force=True)
+            page.keyboard.press("Control+A")
+            page.keyboard.press("Backspace")
+            page.keyboard.insert_text(caption)
+
+            time.sleep(0.8)
+
+            # Verificar el contenido real del contenteditable antes de guardar.
             try:
-                desc.fill(caption, timeout=10000)
-            except Exception as fill_error:
-                print(
-                    f"  ⚠️  fill() falló: {fill_error}; "
-                    "usando teclado como fallback..."
+                editor_text = (
+                    desc.inner_text(timeout=1000)
+                    .replace("\u00a0", " ")
+                    .strip()
                 )
-                desc.click(timeout=5000, force=True)
-                page.keyboard.press("Control+A")
-                page.keyboard.press("Backspace")
-                page.keyboard.insert_text(caption)
+                expected_text = " ".join((caption or "").split()).strip()
+                if editor_text != expected_text:
+                    print(
+                        "  ⚠️  El editor no conserva exactamente el caption; "
+                        "reinsertando mediante teclado..."
+                    )
+                    desc.click(timeout=2000, force=True)
+                    page.keyboard.press("Control+A")
+                    page.keyboard.press("Backspace")
+                    page.keyboard.insert_text(caption)
+                    time.sleep(0.5)
+            except Exception as editor_error:
+                print(
+                    "  ⚠️  No se pudo verificar el contenido del editor: "
+                    f"{str(editor_error).splitlines()[0]}"
+                )
+
+            # Forzamos blur para que Draft.js confirme el último estado antes de
+            # tocar el footer de acciones.
+            try:
+                page.locator("body").click(position={"x": 20, "y": 20})
+            except Exception:
+                pass
 
             time.sleep(0.8)
             cerrar_popups(page)
