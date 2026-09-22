@@ -17,14 +17,6 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install Linux Tk runtime
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-tk
-
-      - name: Install smoke-test dependency
-        run: python -m pip install python-dotenv
-
       - name: Compile Python files
         run: |
           python -m py_compile tiktok_clip_automation.py
