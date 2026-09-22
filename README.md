@@ -34,9 +34,10 @@ El dedupe combina una ventana temporal, la identidad del stream, duración y min
 
 ## Edición
 
-El motor conserva el pipeline de edición: detección de facecam con Kimi (hasta 5 intentos) y DiffusionGemma como fallback, Whisper/whisper.cpp, auto-trim con Nemotron Omni usando proxy 720p/1 FPS y los últimos 120 segundos para clips largos, y render vertical 1080x1920.
+El motor conserva el pipeline de edición: detección de facecam con Kimi (hasta 5 intentos) y DiffusionGemma como fallback, transcripción configurable, auto-trim con Nemotron Omni usando proxy 720p/1 FPS y los últimos 120 segundos para clips largos, y render vertical 1080x1920.
 
-Si Whisper falla por completo y está habilitado **Fallback de subtítulos con Kimi**, TTCA extrae el audio y hace una llamada separada al modelo de Kimi intentando obtener palabras con timestamps. Como la documentación actual de NVIDIA para Kimi-K3 declara entradas de texto e imagen, no audio, TTCA captura ese rechazo y prueba automáticamente un segundo fallback de audio con Nemotron Omni en lugar de abortar el clip. citeturn197837search0turn197837search7turn197837search10
+La transcripción se puede elegir desde Configuración entre **Whisper** (predeterminado) y **Nemotron Omni**. Con Whisper, TTCA intenta primero `whisper.cpp` o `faster-whisper` según la configuración; si todos los intentos de Whisper fallan, hace fallback directo a Nemotron Omni con el audio. Con Omni seleccionado, el audio se envía directamente al modelo para generar la transcripción. Nemotron 3 Nano Omni acepta audio WAV/MP3, soporta transcripción y timestamps a nivel de palabra.
+
 
 FFmpeg se lanza en Windows con prioridad **Idle** por defecto y con un número reducido de hilos para que pueda seguir funcionando junto a OBS con menor competencia por CPU. Se puede ajustar `FFMPEG_PRIORITY` y `FFMPEG_THREADS` desde la configuración avanzada del programa.
 
