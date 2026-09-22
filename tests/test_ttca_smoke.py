@@ -64,6 +64,9 @@ def load_functions():
     assert 'page.mouse.move(x, y)' in source
     assert 'page.mouse.down()' in source
     assert 'page.mouse.up()' in source
+    assert 'page.keyboard.insert_text(caption)' in source
+    assert 'desc.inner_text(timeout=1000)' in source
+    assert 'Forzamos blur' in source
     assert 'REQUEST FAILED' in source
 
     tree = ast.parse(source, filename=str(SOURCE))
