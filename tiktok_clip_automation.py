@@ -1754,6 +1754,72 @@ No agregues Markdown, comentarios ni texto fuera del JSON.
     return words
 
 
+def transcribe_audio_with_omni(audio_path: Path) -> list[dict]:
+    """Último fallback de subtítulos: Nemotron Omni recibe audio directamente."""
+    import base64
+    import requests
+
+    print("  🤖 Fallback adicional: enviando audio a Nemotron Omni...")
+    audio_bytes = audio_path.read_bytes()
+    b64 = base64.b64encode(audio_bytes).decode("utf-8")
+
+    prompt = """Transcribí TODO el audio en español rioplatense.
+Devolvé SOLO JSON válido con esta estructura:
+{"words":[{"word":"hola","start":0.00,"end":0.42},{"word":"mundo","start":0.42,"end":0.88}]}
+Usá segundos desde el inicio del audio.
+Cada elemento debe ser una palabra o token corto con timestamps.
+No agregues Markdown, comentarios ni texto fuera del JSON.
+"""
+
+    headers = {
+        "Authorization": f"Bearer {NVIDIA_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    payload = {
+        "model": NVIDIA_TRIM_OMNI,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "audio_url",
+                    "audio_url": {
+                        "url": f"data:audio/wav;base64,{b64}",
+                    },
+                },
+                {"type": "text", "text": prompt},
+            ],
+        }],
+        "max_tokens": 4096,
+        "temperature": 0.0,
+        "stream": False,
+    }
+
+    response = requests.post(
+        NVIDIA_API_URL,
+        headers=headers,
+        json=payload,
+        timeout=NVIDIA_TRIM_OMNI_TIMEOUT,
+    )
+
+    if response.status_code != 200:
+        detail = _coerce_text(response.text).replace("\n", " ")
+        raise RuntimeError(
+            f"Omni no aceptó el audio (HTTP {response.status_code}): {detail[:400]}"
+        )
+
+    data = response.json()
+    message = data.get("choices", [{}])[0].get("message", {})
+    words = _parse_kimi_transcription_response(
+        _coerce_text(message.get("content"))
+    )
+    if not words:
+        raise RuntimeError("Omni respondió, pero no devolvió subtítulos parseables.")
+
+    print(f"  ✅ Omni fallback: {len(words)} palabras detectadas")
+    return words
+
+
 def transcribe_video(video_path: Path):
     """Transcribe con Whisper; si falla por completo, usa Kimi como fallback opcional."""
     audio_path = None
@@ -1805,11 +1871,20 @@ def transcribe_video(video_path: Path):
             if fallback_audio is None or fallback_audio == video_path:
                 fallback_audio = _extract_audio_for_whisper(video_path)
 
-            words = transcribe_audio_with_kimi(fallback_audio)
-            preview = " ".join(w["word"] for w in words[:25])
-            if preview:
-                print(f"     Preview Kimi: {preview}{'...' if len(words) > 25 else ''}")
-            return words
+            try:
+                words = transcribe_audio_with_kimi(fallback_audio)
+                preview = " ".join(w["word"] for w in words[:25])
+                if preview:
+                    print(f"     Preview Kimi: {preview}{'...' if len(words) > 25 else ''}")
+                return words
+            except Exception as kimi_error:
+                print(f"  ⚠️  Kimi no pudo transcribir el audio: {kimi_error}")
+                print("  → Intentando Nemotron Omni como último fallback de subtítulos...")
+                words = transcribe_audio_with_omni(fallback_audio)
+                preview = " ".join(w["word"] for w in words[:25])
+                if preview:
+                    print(f"     Preview Omni: {preview}{'...' if len(words) > 25 else ''}")
+                return words
 
     finally:
         if audio_path is not None and audio_path != video_path:
