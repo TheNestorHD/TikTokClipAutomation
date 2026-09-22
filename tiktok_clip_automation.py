@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.3.3"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -76,6 +76,11 @@ DEFAULT_RELATIVE_PATHS = {
     "WHISPER_CPP_MODEL": "tools/whisper.cpp/models/ggml-large-v3.bin",
     "TIKTOK_COOKIES_FILE": "data/tiktok_cookies.txt",
     "TIKTOK_UPLOAD_REGISTRY": "data/tiktok_uploads.json",
+}
+
+JUST_CHATTING_CATEGORY = "just chatting"
+JUST_CHATTING_VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".ts", ".m2ts"
 }
 
 
@@ -306,6 +311,64 @@ def ensure_dirs(strict: bool = False):
         if strict:
             return False
     return True
+
+
+def _clip_category_name(clip: dict | None) -> str:
+    """Obtiene el nombre de la categoría de Kick sin asumir un único formato de API."""
+    clip = clip or {}
+
+    category = clip.get("category")
+    if isinstance(category, dict):
+        name = category.get("name")
+    else:
+        name = category
+
+    if name:
+        return str(name).strip()
+
+    return str(
+        clip.get("category_name")
+        or clip.get("categoryName")
+        or ""
+    ).strip()
+
+
+def is_just_chatting_clip(clip: dict | None) -> bool:
+    """Detecta la categoría Just Chatting sin importar mayúsculas/minúsculas."""
+    return _clip_category_name(clip).casefold() == JUST_CHATTING_CATEGORY
+
+
+def pick_just_chatting_gameplay() -> Path:
+    """Elige aleatoriamente un video de gameplay dentro de assets/."""
+    assets_dir = APP_DIR / "assets"
+    candidates = sorted(
+        path
+        for path in assets_dir.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in JUST_CHATTING_VIDEO_EXTENSIONS
+        and not path.name.startswith(".")
+    )
+
+    if not candidates:
+        raise FileNotFoundError(
+            "No hay videos de gameplay para Just Chatting en assets/. "
+            "Agregá al menos un video (.mp4, .mov, .mkv, .webm, etc.)."
+        )
+
+    selected = random.choice(candidates)
+    print(f"  🎮 Gameplay de fondo elegido al azar: {selected.relative_to(assets_dir)}")
+    return selected
+
+
+def just_chatting_top_height(orig_w: int, orig_h: int) -> int:
+    """Calcula la altura del panel superior preservando el aspecto del clip."""
+    natural_h = max(2, int(round(TARGET_W * orig_h / max(orig_w, 1))))
+    effective_divider_h = DIVIDER_H if DIVIDER_PATH.exists() else 0
+
+    top_h = max(600, min(natural_h, 960))
+    max_top = TARGET_H - effective_divider_h - 400
+    top_h = min(top_h, max_top)
+    return max(2, top_h - (top_h % 2))
 
 
 def get_video_info(path: Path):
@@ -2370,6 +2433,9 @@ def _register_clip_metadata(clip: dict, registry: dict, **extra):
         "started_at": clip.get("started_at"),
         "stream_identity": _clip_stream_identity(clip),
         "duration": duration,
+        "category_name": _clip_category_name(clip),
+        "channel": clip.get("channel") or KICK_CHANNEL,
+        "platform": clip.get("platform") or "Kick",
     }
     fields.update(extra)
     update_clip_registry(registry, clip_id, **fields)
@@ -2636,6 +2702,9 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     "id": clip_id,
                     "title": record.get("title") or local_path.stem,
                     "created_at": record.get("created_at"),
+                    "category_name": record.get("category_name") or "",
+                    "channel": record.get("channel") or KICK_CHANNEL,
+                    "platform": record.get("platform") or "Kick",
                     "local_path": str(local_path),
                 })
                 print(
