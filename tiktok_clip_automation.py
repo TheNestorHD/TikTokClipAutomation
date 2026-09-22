@@ -2769,7 +2769,12 @@ def _pipeline_stats() -> dict:
 
     # Un clip en awaiting_tiktok/queued/uploading sigue pendiente hasta que
     # TikTok confirme éxito o fallo. Los fallos terminales no cuentan como pendientes.
-    tiktok_pending_total = len(tiktok_pending)
+    awaiting_tiktok_ids = {
+        str(clip_id)
+        for clip_id, record in registry.items()
+        if record.get("status") == "awaiting_tiktok"
+    }
+    tiktok_pending_total = len(tiktok_pending | awaiting_tiktok_ids)
     tiktok_pending_total += sum(
         1
         for item in tiktok_items.values()
