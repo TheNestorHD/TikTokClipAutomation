@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
