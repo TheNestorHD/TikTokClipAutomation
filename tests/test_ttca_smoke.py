@@ -12,7 +12,7 @@ SOURCE = Path(__file__).resolve().parents[1] / "tiktok_clip_automation.py"
 FUNCTIONS = {
     "_coerce_text",
     "_clean_transcribed_words",
-    "_parse_kimi_transcription_response",
+    "_parse_transcription_response",
     "_clip_category_name",
     "is_just_chatting_clip",
     "pick_just_chatting_gameplay",
@@ -61,7 +61,7 @@ def main():
     namespace = load_functions()
 
     assert namespace["_coerce_text"]({"caption": "hola"}) == "hola"
-    parsed = namespace["_parse_kimi_transcription_response"](
+    parsed = namespace["_parse_transcription_response"](
         json.dumps(
             {
                 "words": [
