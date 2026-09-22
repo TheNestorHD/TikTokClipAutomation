@@ -727,8 +727,12 @@ def suggest_trim_omni_video(
         return None
 
     proxy, source_offset, proxy_duration = proxy_data
-    title_for_prompt = (clip_title or video_path.stem or "Nuevo clip").strip()
-    channel_for_prompt = (clip_channel or KICK_CHANNEL or "canal").strip()
+    title_for_prompt = _coerce_text(
+        clip_title or video_path.stem or "Nuevo clip"
+    ).strip()
+    channel_for_prompt = _coerce_text(
+        clip_channel or KICK_CHANNEL or "canal"
+    ).strip()
 
     try:
         b64 = base64.b64encode(proxy.read_bytes()).decode("utf-8")
@@ -2337,7 +2341,9 @@ def process_one_clip(
     if suggested:
         start_sec = float(suggested["start"])
         end_sec = float(suggested["end"])
-        generated_caption = str(suggested.get("caption") or "").strip()
+        generated_caption = _coerce_text(
+            suggested.get("caption")
+        ).strip()
 
     if clip_metadata is not None:
         clip_metadata["generated_caption"] = generated_caption
@@ -5747,6 +5753,15 @@ class TikTokClipAutomationApp:
             self.tiktok_manager = TikTokUploadManager(log_callback=self.log)
             self.tiktok_manager.start()
         queued = self.tiktok_manager.enqueue(output_path, clip)
+        if not queued:
+            state = self.tiktok_manager.load_state()
+            item = state.get("items", {}).get(str(output_path.resolve()))
+            if item and item.get("status") in {"uploaded", "draft_saved", "failed"}:
+                _sync_pipeline_from_tiktok(
+                    item,
+                    item.get("status"),
+                    item.get("last_error"),
+                )
         self.root.after(0, self._refresh_tiktok_queue)
         return queued
 
