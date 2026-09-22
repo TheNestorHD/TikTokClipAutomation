@@ -2741,8 +2741,8 @@ def save_clip_registry(registry: dict) -> bool:
             registry.clear()
             registry.update(keep)
 
-        tmp_path = CLIP_REGISTRY_FILE.with_suffix(
-            CLIP_REGISTRY_FILE.suffix + ".tmp"
+        tmp_path = CLIP_REGISTRY_FILE.with_name(
+            f"{CLIP_REGISTRY_FILE.name}.{os.getpid()}.{threading.get_ident()}.tmp"
         )
 
         try:
@@ -2776,6 +2776,10 @@ def save_clip_registry(registry: dict) -> bool:
             "  ⚠️  El registro seguirá actualizado en memoria; "
             "no se redescargarán clips viejos durante esta ejecución."
         )
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         return False
 
 
