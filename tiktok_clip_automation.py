@@ -3357,6 +3357,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     "downloaded",
                     "processing",
                     "processed",
+                    "awaiting_tiktok",
                     "duplicate",
                 }:
                     continue
@@ -3534,7 +3535,55 @@ def cargar_cookies(context, cookies_path: Path):
 
 
 def cerrar_popups(page):
-    """Intenta cerrar los popups más comunes de TikTok Studio + tours"""
+    """Cierra popups/tours de TikTok Studio y modales que puedan bloquear el formulario."""
+    # TikTok puede mostrar este modal después de terminar el procesamiento del video.
+    # Cuando aparece, su overlay intercepta los clicks sobre el editor de descripción.
+    modal_selectores = [
+        'text="Turn on automatic content checks?"',
+        'text="Turn on automatic content checks"',
+        'text="Automatic content checks"',
+        'text="¿Activar las comprobaciones automáticas de contenido?"',
+    ]
+
+    modal_boton_selectores = [
+        'button:has-text("Not now")',
+        'button:has-text("No thanks")',
+        'button:has-text("Maybe later")',
+        'button:has-text("Cancel")',
+        'button:has-text("Close")',
+        'button[aria-label="Close"]',
+        'button[aria-label="close"]',
+    ]
+
+    try:
+        modal_visible = any(
+            page.locator(sel).is_visible(timeout=500)
+            for sel in modal_selectores
+        )
+        if modal_visible:
+            for sel in modal_boton_selectores:
+                try:
+                    btn = page.locator(sel).last
+                    if not btn.is_visible(timeout=700):
+                        continue
+
+                    disabled = (
+                        btn.get_attribute("disabled")
+                        or btn.get_attribute("aria-disabled")
+                        or btn.get_attribute("data-disabled")
+                    )
+                    if str(disabled).lower() in {"true", "1"}:
+                        continue
+
+                    btn.click(timeout=2500)
+                    print(f"  → Cerrado modal de comprobaciones automáticas: {sel}")
+                    time.sleep(0.8)
+                    break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
     selectores = [
         # Botones normales
         'button:has-text("Got it")',
@@ -3548,7 +3597,7 @@ def cerrar_popups(page):
         'button:has-text("Done")',
         'button:has-text("Entendido")',
         'button:has-text("Saltar")',
-        
+
         # React Joyride
         '[data-test-id="overlay"]',
         '.react-joyride__overlay',
@@ -3565,17 +3614,44 @@ def cerrar_popups(page):
             for i in range(count):
                 el = elements.nth(i)
                 if el.is_visible(timeout=800):
-                    el.click(timeout=1500)
+                    try:
+                        el.click(timeout=1500)
+                    except Exception:
+                        el.evaluate("el => el.click()")
                     print(f"  → Cerrado popup/tour: {sel}")
                     time.sleep(0.6)
         except Exception:
             pass
 
-    # Click suave fuera por si queda overlay
+    # Último intento específico: algunos overlays de TikTok solo desaparecen
+    # cuando se pulsa un botón mediante JS.
+    try:
+        overlays = page.locator('div[class*="TUXModal-overlay"]')
+        for i in range(overlays.count()):
+            overlay = overlays.nth(i)
+            if not overlay.is_visible(timeout=300):
+                continue
+
+            # No ocultamos arbitrariamente el modal: primero intentamos su botón
+            # secundario/negativo más cercano.
+            container = overlay.locator("xpath=..")
+            for sel in modal_boton_selectores:
+                try:
+                    btn = container.locator(sel).last
+                    if btn.is_visible(timeout=300):
+                        btn.evaluate("el => el.click()")
+                        print(f"  → Cerrado overlay de TikTok mediante JS: {sel}")
+                        time.sleep(0.6)
+                        break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
     try:
         page.mouse.click(10, 10)
         time.sleep(0.4)
-    except:
+    except Exception:
         pass
 
 
@@ -3759,6 +3835,8 @@ def _subir_video_intento(
                 print("→ Buscando botón Guardar borrador...")
 
                 draft_selectors = [
+                    'button[data-e2e="save_draft_button"]',
+                    'div[data-e2e="save_draft_button"][role="button"]',
                     'button:has-text("Save draft")',
                     'button:has-text("Save Draft")',
                     'button:has-text("Guardar borrador")',
@@ -3814,9 +3892,11 @@ def _subir_video_intento(
                         "saved as draft" in content,
                         "draft saved" in content,
                         "saved in drafts" in content,
+                        "draft saved successfully" in content,
                         "guardado en borradores" in content,
                         "borrador guardado" in content,
                         "/draft" in url,
+                        "/content" in url and "tiktokstudio" in url and "upload" not in url,
                     ])
 
                     fallo = any([
@@ -3824,6 +3904,26 @@ def _subir_video_intento(
                         "try again" in content,
                         "failed" in content and "upload" in content,
                     ])
+
+                    # El botón exacto de TikTok pasa a loading/disabled mientras
+                    # procesa el guardado. Si el modal/toast todavía no expuso texto,
+                    # damos un pequeño margen para que termine la navegación interna.
+                    try:
+                        draft_btn = page.locator('button[data-e2e="save_draft_button"]').first
+                        if draft_btn.count() > 0:
+                            disabled = (
+                                draft_btn.get_attribute("disabled")
+                                or draft_btn.get_attribute("aria-disabled")
+                                or draft_btn.get_attribute("data-disabled")
+                            )
+                            loading = draft_btn.get_attribute("data-loading")
+                            if str(loading).lower() == "true":
+                                time.sleep(1)
+                                continue
+                            if str(disabled).lower() in {"true", "1"} and not fallo:
+                                time.sleep(1)
+                    except Exception:
+                        pass
 
                     if exito and not fallo:
                         guardado = True
