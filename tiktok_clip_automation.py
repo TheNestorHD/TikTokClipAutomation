@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.4.4"
+APP_VERSION = "0.4.5"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -4405,9 +4405,9 @@ def _subir_video_intento(
                 except Exception:
                     pass
 
-                # Instrumentación temporal/permanente de la acción de guardado:
-                # registra respuestas relacionadas con upload/draft/content para que
-                # un fallo del backend de TikTok no quede silencioso en consola.
+                # TikTok Studio usa un botón React real. Un click DOM puede no
+                # reproducir exactamente la interacción que espera el footer, por lo
+                # que primero usamos coordenadas físicas sobre el centro del botón.
                 save_network_events = []
 
                 def _log_save_response(response):
@@ -4422,16 +4422,16 @@ def _subir_video_intento(
                             )
                         ):
                             save_network_events.append(
-                                f"HTTP {response.status} {url[:220]}"
+                                f"HTTP {response.status} {url[:260]}"
                             )
                     except Exception:
                         pass
 
                 def _log_save_request_failed(request):
                     try:
+                        failure = request.failure
                         save_network_events.append(
-                            f"REQUEST FAILED {request.url[:220]} "
-                            f"{request.failure or ''}".strip()
+                            f"REQUEST FAILED {request.url[:260]} {failure or ''}".strip()
                         )
                     except Exception:
                         pass
@@ -4450,6 +4450,7 @@ def _subir_video_intento(
                             "aria_disabled": draft_btn.get_attribute("aria-disabled"),
                             "data_disabled": draft_btn.get_attribute("data-disabled"),
                             "data_loading": draft_btn.get_attribute("data-loading"),
+                            "text": draft_btn.inner_text(timeout=500),
                             "url": page.url,
                         }
                     except Exception as exc:
@@ -4461,17 +4462,39 @@ def _subir_video_intento(
                 clicked = False
                 click_method = ""
 
+                # 1) Interacción física sobre el centro del botón.
                 try:
-                    # Forzamos el click sobre el elemento exacto para no depender
-                    # de capas visuales/animaciones del footer.
-                    draft_btn.click(timeout=4000, force=True, no_wait_after=True)
-                    clicked = True
-                    click_method = "Playwright force click"
-                except Exception as click_error:
+                    box = draft_btn.bounding_box()
+                    if box:
+                        x = box["x"] + box["width"] / 2
+                        y = box["y"] + box["height"] / 2
+                        page.mouse.move(x, y)
+                        time.sleep(0.15)
+                        page.mouse.down()
+                        time.sleep(0.08)
+                        page.mouse.up()
+                        clicked = True
+                        click_method = "mouse coordinates"
+                        print(
+                            f"  → Click físico enviado en "
+                            f"({x:.0f}, {y:.0f})"
+                        )
+                except Exception as mouse_error:
                     print(
-                        "  ⚠️  Click normal no pudo completarse: "
-                        f"{str(click_error).splitlines()[0]}"
+                        "  ⚠️  Click físico falló: "
+                        f"{str(mouse_error).splitlines()[0]}"
                     )
+
+                if not clicked:
+                    try:
+                        draft_btn.click(timeout=4000, force=True, no_wait_after=True)
+                        clicked = True
+                        click_method = "Playwright force click"
+                    except Exception as click_error:
+                        print(
+                            "  ⚠️  Click Playwright falló: "
+                            f"{str(click_error).splitlines()[0]}"
+                        )
 
                 if not clicked:
                     try:
@@ -4502,33 +4525,45 @@ def _subir_video_intento(
 
                 print(f"  → Click de Guardar borrador enviado ({click_method})")
                 time.sleep(0.8)
-
                 after_click_state = _draft_button_state()
                 print(f"  Estado después del click: {after_click_state}")
 
-                # Si el botón ni siquiera cambia a loading/disabled ni hay navegación,
-                # repetimos una única vez mediante DOM. Esto cubre eventos que TikTok
-                # pierde cuando React está actualizando el editor simultáneamente.
+                # Tras el click físico, una respuesta HTTP de TikTok es una señal
+                # mucho más útil que esperar un cambio de atributo del botón.
+                if save_network_events:
+                    for event in save_network_events[-12:]:
+                        print(f"  🌐 {event}")
+
                 try:
                     no_visible_transition = (
                         before_state.get("url") == after_click_state.get("url")
-                        and after_click_state.get("data_loading") not in {"true", True}
-                        and after_click_state.get("aria_disabled") not in {"true", True}
-                        and after_click_state.get("data_disabled") not in {"true", True}
+                        and before_state.get("data_loading")
+                        == after_click_state.get("data_loading")
+                        and before_state.get("aria_disabled")
+                        == after_click_state.get("aria_disabled")
+                        and before_state.get("data_disabled")
+                        == after_click_state.get("data_disabled")
                     )
                 except Exception:
                     no_visible_transition = False
 
                 if no_visible_transition:
+                    print(
+                        "  ⚠️  El primer click no produjo transición visible. "
+                        "Reintentando una sola vez con click físico..."
+                    )
                     try:
-                        print("  ⚠️  El estado no cambió; reintentando click DOM una vez...")
-                        draft_btn.evaluate("(el) => el.click()")
-                        click_method += " + DOM retry"
-                        time.sleep(0.8)
-                        print(f"  Estado tras reintento: {_draft_button_state()}")
+                        box = draft_btn.bounding_box()
+                        if box:
+                            x = box["x"] + box["width"] / 2
+                            y = box["y"] + box["height"] / 2
+                            page.mouse.click(x, y)
+                            click_method += " + mouse retry"
+                            time.sleep(1.0)
+                            print(f"  Estado tras reintento: {_draft_button_state()}")
                     except Exception as retry_error:
                         print(
-                            "  ⚠️  Reintento DOM falló: "
+                            "  ⚠️  Reintento físico falló: "
                             f"{str(retry_error).splitlines()[0]}"
                         )
 
@@ -4540,6 +4575,7 @@ def _subir_video_intento(
                 guardado = False
                 deadline = time.time() + TIKTOK_CONFIRM_TIMEOUT_SECONDS
                 upload_url = page.url
+                last_event_count = len(save_network_events)
 
                 while time.time() < deadline:
                     try:
@@ -4572,6 +4608,11 @@ def _subir_video_intento(
                             guardado = True
                             break
 
+                        if len(save_network_events) > last_event_count:
+                            for event in save_network_events[last_event_count:]:
+                                print(f"  🌐 {event}")
+                            last_event_count = len(save_network_events)
+
                         current_btn = page.locator(draft_selector).first
                         try:
                             if current_btn.count() == 0 and page.url != upload_url:
@@ -4601,8 +4642,10 @@ def _subir_video_intento(
                                 break
 
                             if (
-                                (aria_disabled in {"true", "1"}
-                                or data_disabled in {"true", "1"})
+                                (
+                                    aria_disabled in {"true", "1"}
+                                    or data_disabled in {"true", "1"}
+                                )
                                 and not fallo
                             ):
                                 time.sleep(0.5)
