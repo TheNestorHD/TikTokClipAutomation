@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.4.2"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -72,6 +72,7 @@ DEFAULT_RELATIVE_PATHS = {
     "DIVIDER_PATH": "assets/divider.png",
     "FONT_PATH": "assets/TF2 build.ttf",
     "CLIP_REGISTRY_FILE": "data/seen_clips.json",
+    "TRANSCRIPT_DIR": "data/transcripts",
     "WHISPER_CPP_EXE": "tools/whisper.cpp/whisper-cli.exe",
     "WHISPER_CPP_MODEL": "tools/whisper.cpp/models/ggml-large-v3.bin",
     "TIKTOK_COOKIES_FILE": "data/tiktok_cookies.txt",
@@ -81,9 +82,6 @@ DEFAULT_RELATIVE_PATHS = {
 
 JUST_CHATTING_CATEGORY = "just chatting"
 JUST_CHATTING_MODE_ENABLED = env_bool("JUST_CHATTING_MODE_ENABLED", True)
-TRANSCRIPTION_MODEL = env_value("TRANSCRIPTION_MODEL", "whisper").strip().lower()
-if TRANSCRIPTION_MODEL not in {"whisper", "omni"}:
-    TRANSCRIPTION_MODEL = "whisper"
 JUST_CHATTING_RETENTION_DIR = resolve_path(
     env_value(
         "JUST_CHATTING_RETENTION_DIR",
@@ -104,6 +102,9 @@ RECYCLE_BIN_TOKEN = "__RECYCLE_BIN__"
 DIVIDER_PATH = resolve_path(env_value("DIVIDER_PATH", DEFAULT_RELATIVE_PATHS["DIVIDER_PATH"]))
 FONT_PATH = resolve_path(env_value("FONT_PATH", DEFAULT_RELATIVE_PATHS["FONT_PATH"]))
 CLIP_REGISTRY_FILE = resolve_path(env_value("CLIP_REGISTRY_FILE", DEFAULT_RELATIVE_PATHS["CLIP_REGISTRY_FILE"]))
+TRANSCRIPT_DIR = resolve_path(
+    env_value("TRANSCRIPT_DIR", DEFAULT_RELATIVE_PATHS["TRANSCRIPT_DIR"])
+)
 
 # --- Video ---
 TARGET_W = env_int("TARGET_W", 1080)
@@ -208,6 +209,7 @@ PIPELINE_DOWNLOAD_THREAD = None
 PIPELINE_PROCESSING_THREAD = None
 PIPELINE_REGISTRY = None
 PIPELINE_REGISTRY_LOCK = threading.RLock()
+TIKTOK_STATE_LOCK = threading.RLock()
 
 # ============================================================
 # UTILIDADES
@@ -246,11 +248,10 @@ def check_dependencies(exit_on_error: bool = False):
     except ImportError:
         missing.append("numpy")
 
-    if TRANSCRIPTION_MODEL == "whisper":
-        try:
-            from faster_whisper import WhisperModel
-        except ImportError:
-            missing.append("faster-whisper")
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        missing.append("faster-whisper")
 
     try:
         from PIL import Image
@@ -307,6 +308,7 @@ def ensure_dirs(strict: bool = False):
         USED_DIR.mkdir(parents=True, exist_ok=True)
 
     CLIP_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
     TIKTOK_UPLOAD_REGISTRY.parent.mkdir(parents=True, exist_ok=True)
     TIKTOK_COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
     DIVIDER_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -706,24 +708,45 @@ def _ensure_omni_identity_hashtags(caption: str, channel: str) -> str:
     return " ".join(caption.split())
 
 
+def _format_transcription_for_omni(words: list[dict]) -> str:
+    """Formatea la transcripción de Whisper con timestamps por palabra para Omni."""
+    if not words:
+        return "(sin transcripción disponible)"
+    lines = []
+    for word in words:
+        try:
+            start = float(word.get("start", 0))
+            end = float(word.get("end", start))
+        except (TypeError, ValueError):
+            continue
+        text_value = " ".join(str(word.get("word") or "").split())
+        if not text_value:
+            continue
+        lines.append(f"[{start:07.2f}-{end:07.2f}] {text_value}")
+    return "\n".join(lines) or "(sin transcripción disponible)"
+
+
 def suggest_trim_omni_video(
     video_path: Path,
     duration: float,
     clip_title: str = "",
     clip_channel: str = "",
+    clip_category: str = "",
+    transcription_words: list[dict] | None = None,
     max_retries: int = 5,
     just_chatting: bool = False,
 ) -> dict | None:
     """
     Auto-trim con Nemotron Omni usando un proxy de 720p a 1 FPS.
-    Para clips >120 s, el proxy corresponde a los últimos 120 s del original.
-    En modo IA también genera la descripción + hashtags usando el mismo análisis.
+    Omni recibe además el título, categoría y la transcripción de Whisper
+    con timestamps por palabra para decidir el recorte y, si está habilitado,
+    la descripción del Reel.
     """
     import base64
     import re
     import requests
 
-    print("  🤖 Auto-trim + contexto con Nemotron Omni (video)...")
+    print("  🤖 Auto-trim + caption/contexto con Nemotron Omni...")
     proxy_data = _make_trim_proxy(video_path, duration)
     if proxy_data is None:
         return None
@@ -735,6 +758,12 @@ def suggest_trim_omni_video(
     channel_for_prompt = _coerce_text(
         clip_channel or KICK_CHANNEL or "canal"
     ).strip()
+    category_for_prompt = _coerce_text(
+        clip_category or "Desconocida"
+    ).strip()
+    transcript_for_prompt = _format_transcription_for_omni(
+        transcription_words or []
+    )
 
     try:
         b64 = base64.b64encode(proxy.read_bytes()).decode("utf-8")
@@ -743,7 +772,8 @@ def suggest_trim_omni_video(
         caption_rules = ""
         if TIKTOK_CAPTION_MODE == "omni":
             caption_rules = """
-ADEMÁS, generá una descripción para TikTok basándote en lo que ocurre en el clip y en su título.
+ADEMÁS, generá una descripción para TikTok basándote en lo que ocurre en el clip,
+su título, su categoría y la transcripción proporcionada.
 - Debe sonar natural, breve y atractiva para un Reel.
 - Conservá el tono rioplatense/humorístico del streamer cuando corresponda.
 - Incluí 3 a 6 hashtags relevantes.
@@ -767,17 +797,26 @@ Estilo: humor absurdo, reacciones exageradas, sarcasmo, fallos épicos, punchlin
 TÍTULO ORIGINAL DEL CLIP EN KICK:
 "{title_for_prompt}"
 
+CATEGORÍA DEL CLIP:
+"{category_for_prompt}"
+
 CANAL:
 "{channel_for_prompt}"
 
 PLATAFORMA:
 "Kick"
 
+TRANSCRIPCIÓN GENERADA EXCLUSIVAMENTE POR WHISPER:
+Los timestamps son del clip ORIGINAL, no del proxy.
+Cada línea representa una palabra o token corto:
+{transcript_for_prompt}
+
 Estás VIENDO un proxy de 720p a 1 FPS.
 El proxy representa desde {source_offset:.1f}s hasta {source_offset + proxy_duration:.1f}s del clip original.
 Duración real del original: {duration:.1f}s.
 
-Elegí el tramo MÁS viral para un Reel de TikTok.
+Usá la información VISUAL y la TRANSCRIPCIÓN para elegir el tramo MÁS viral para un Reel de TikTok.
+No vuelvas a transcribir el audio: la transcripción anterior ya es la fuente de verdad.
 
 REGLAS DE DURACIÓN:
 - Largo IDEAL: 15 a 20 segundos.
@@ -789,6 +828,7 @@ REGLAS DE DURACIÓN:
   * 2–5s DESPUÉS
 - Si el mejor momento necesita más de 20s, devolvé el tramo largo.
 - Los tiempos que devuelvas deben ser RELATIVOS AL PROXY, no al original.
+
 __CAPTION_RULES__
 
 Respondé SOLO este JSON:
@@ -932,11 +972,14 @@ No agregues Markdown ni texto fuera del JSON.
         except Exception:
             pass
 
+
 def suggest_trim_llm(
     duration: float,
     video_path: Path | None = None,
     clip_title: str = "",
     clip_channel: str = "",
+    clip_category: str = "",
+    transcription_words: list[dict] | None = None,
     just_chatting: bool = False,
 ) -> dict | None:
     """Punto de entrada al auto-trim; usa Nemotron Omni para trim y contexto."""
@@ -946,6 +989,8 @@ def suggest_trim_llm(
             duration,
             clip_title=clip_title,
             clip_channel=clip_channel,
+            clip_category=clip_category,
+            transcription_words=transcription_words,
             just_chatting=just_chatting,
         )
 
@@ -1686,81 +1731,12 @@ def _parse_transcription_response(response_text: str) -> list[dict]:
     return _clean_transcribed_words(words)
 
 
-
-def transcribe_audio_with_omni(audio_path: Path) -> list[dict]:
-    """Transcribe audio directamente con Nemotron Omni."""
-    import base64
-    import requests
-
-    print("  🤖 Transcripción: Nemotron Omni (audio)...")
-    audio_bytes = audio_path.read_bytes()
-    b64 = base64.b64encode(audio_bytes).decode("utf-8")
-
-    prompt = """Transcribí TODO el audio en español rioplatense.
-Devolvé SOLO JSON válido con esta estructura:
-{"words":[{"word":"hola","start":0.00,"end":0.42},{"word":"mundo","start":0.42,"end":0.88}]}
-Usá segundos desde el inicio del audio.
-Cada elemento debe ser una palabra o token corto con timestamps.
-No agregues Markdown, comentarios ni texto fuera del JSON.
-"""
-
-    headers = {
-        "Authorization": f"Bearer {NVIDIA_API_KEY}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    payload = {
-        "model": NVIDIA_TRIM_OMNI,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {
-                    "type": "audio_url",
-                    "audio_url": {
-                        "url": f"data:audio/wav;base64,{b64}",
-                    },
-                },
-                {"type": "text", "text": prompt},
-            ],
-        }],
-        "max_tokens": 4096,
-        "temperature": 0.0,
-        "stream": False,
-        "chat_template_kwargs": {
-            "enable_thinking": False,
-        },
-    }
-
-    response = requests.post(
-        NVIDIA_API_URL,
-        headers=headers,
-        json=payload,
-        timeout=NVIDIA_TRIM_OMNI_TIMEOUT,
-    )
-
-    if response.status_code != 200:
-        detail = _coerce_text(response.text).replace("\n", " ")
-        raise RuntimeError(
-            f"Omni no aceptó el audio (HTTP {response.status_code}): {detail[:400]}"
-        )
-
-    data = response.json()
-    message = data.get("choices", [{}])[0].get("message", {})
-    words = _parse_transcription_response(
-        _coerce_text(message.get("content"))
-    )
-    if not words:
-        raise RuntimeError("Omni respondió, pero no devolvió subtítulos parseables.")
-
-    print(f"  ✅ Omni: {len(words)} palabras detectadas")
-    return words
-
-
 def transcribe_video(video_path: Path):
     """
-    Transcribe según la configuración:
-    - whisper (predeterminado): whisper.cpp/faster-whisper; si falla completamente, Omni.
-    - omni: Nemotron Omni recibe el audio directamente.
+    Transcribe SIEMPRE con Whisper:
+    - whisper.cpp cuando está disponible/configurado.
+    - fallback a faster-whisper si whisper.cpp falla.
+    - si ambos fallan, la etapa termina con error; NO se usa Omni.
     """
     audio_path = None
 
@@ -1771,9 +1747,6 @@ def transcribe_video(video_path: Path):
         except Exception as e:
             print(f"  ⚠️  No se pudo preparar el audio ({e})")
             audio_path = video_path
-
-        if TRANSCRIPTION_MODEL == "omni":
-            return transcribe_audio_with_omni(audio_path)
 
         try:
             use_cpp = (
@@ -1803,17 +1776,10 @@ def transcribe_video(video_path: Path):
             return words
 
         except Exception as whisper_error:
-            print(f"  ❌ Whisper falló completamente: {whisper_error}")
-            print("  → Fallback directo a Nemotron Omni...")
-            fallback_audio = audio_path
-            if fallback_audio is None or fallback_audio == video_path:
-                fallback_audio = _extract_audio_for_whisper(video_path)
-
-            words = transcribe_audio_with_omni(fallback_audio)
-            preview = " ".join(w["word"] for w in words[:25])
-            if preview:
-                print(f"     Preview Omni: {preview}{'...' if len(words) > 25 else ''}")
-            return words
+            raise RuntimeError(
+                f"Whisper falló completamente (whisper.cpp + faster-whisper): "
+                f"{whisper_error}"
+            ) from whisper_error
 
     finally:
         if audio_path is not None and audio_path != video_path:
@@ -1821,7 +1787,6 @@ def transcribe_video(video_path: Path):
                 audio_path.unlink(missing_ok=True)
             except Exception:
                 pass
-
 
 
 # ============================================================
@@ -2183,6 +2148,69 @@ def move_to_used(video_path: Path) -> Path | None:
         return None
 
 
+def _transcription_cache_path(video_path: Path, clip_metadata: dict | None = None) -> Path:
+    """Ruta estable para la transcripción persistente del clip."""
+    clip_id = str((clip_metadata or {}).get("id") or "").strip()
+    if not clip_id:
+        clip_id = "local_" + hashlib.sha1(
+            str(video_path.resolve()).encode("utf-8")
+        ).hexdigest()[:20]
+    safe_id = hashlib.sha1(clip_id.encode("utf-8")).hexdigest()[:24]
+    return TRANSCRIPT_DIR / f"{safe_id}.json"
+
+
+def _load_cached_transcription(
+    video_path: Path,
+    clip_metadata: dict | None = None,
+) -> list[dict] | None:
+    """Carga la transcripción si pertenece al mismo archivo fuente."""
+    cache_path = _transcription_cache_path(video_path, clip_metadata)
+    if not cache_path.exists():
+        return None
+    try:
+        data = cargar_json(cache_path, {})
+        stat = video_path.stat()
+        if (
+            data.get("source_path") != str(video_path.resolve())
+            or int(data.get("source_size", -1)) != int(stat.st_size)
+            or int(data.get("source_mtime_ns", -1)) != int(stat.st_mtime_ns)
+        ):
+            return None
+        words = data.get("words")
+        if not isinstance(words, list):
+            return None
+        cleaned = _clean_transcribed_words(words)
+        return cleaned or []
+    except Exception:
+        return None
+
+
+def _save_transcription_cache(
+    video_path: Path,
+    words: list[dict],
+    clip_metadata: dict | None = None,
+    model_name: str = "whisper",
+):
+    """Guarda de forma atómica la transcripción de Whisper."""
+    try:
+        stat = video_path.stat()
+        cache_path = _transcription_cache_path(video_path, clip_metadata)
+        guardar_json(
+            cache_path,
+            {
+                "version": 1,
+                "source_path": str(video_path.resolve()),
+                "source_size": int(stat.st_size),
+                "source_mtime_ns": int(stat.st_mtime_ns),
+                "model": model_name,
+                "created_at": datetime.now().isoformat(),
+                "words": words,
+            },
+        )
+    except Exception as exc:
+        print(f"  ⚠️  No se pudo guardar la transcripción en caché: {exc}")
+
+
 def process_one_clip(
     video_path: Path,
     interactive: bool = True,
@@ -2199,18 +2227,28 @@ def process_one_clip(
     print(f"  Resolución original: {orig_w}x{orig_h} | {duration:.1f}s | {fps:.2f} fps")
 
     output_path = OUTPUT_DIR / f"reel_{video_path.stem}.mp4"
+    partial_output_path = output_path.with_name(
+        output_path.stem + ".part" + output_path.suffix
+    )
     if SKIP_EXISTING_OUTPUT and output_path.exists() and output_path.stat().st_size >= MIN_VALID_OUTPUT_BYTES:
-        # Validación extra: un mp4 con tamaño suficiente pero moov atom roto / video
-        # corrupto pasa el filtro de tamaño. Hacemos un probe barato para confirmarlo.
         try:
-            get_video_info(video_path)
+            get_video_info(output_path)
         except Exception as probe_err:
-            print(f"  ⚠️  El clip existe pero ffprobe no lo pudo leer: {probe_err}")
-            print("  → Lo marco como descarga corrupta y aborto (no se saltea ni se mueve).")
-            raise RuntimeError(f"Clip inválido/corrupto: {video_path.name}")
-        print(f"  ⏭️  El Reel ya existe: {output_path.name}")
-        move_to_used(video_path)
-        return True
+            print(f"  ⚠️  El Reel existe pero ffprobe no lo pudo leer: {probe_err}")
+            try:
+                output_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        else:
+            print(f"  ⏭️  El Reel ya existe: {output_path.name}")
+            if video_path.exists():
+                move_to_used(video_path)
+            return True
+    if partial_output_path.exists():
+        try:
+            partial_output_path.unlink()
+        except Exception:
+            pass
 
     category_name = _clip_category_name(clip_metadata)
     just_chatting = JUST_CHATTING_MODE_ENABLED and (
@@ -2315,12 +2353,22 @@ def process_one_clip(
                 print("  ⏭️  Saltado por el usuario.")
                 return False
 
-    # ---- 2. Transcribir ----
-    words = transcribe_video(video_path)
+    # ---- 2. Transcribir (solo Whisper) ----
+    words = _load_cached_transcription(video_path, clip_metadata)
+    if words is not None:
+        print(f"  💾 Transcripción de Whisper recuperada de caché: {len(words)} palabras")
+    else:
+        words = transcribe_video(video_path)
+        _save_transcription_cache(
+            video_path,
+            words,
+            clip_metadata=clip_metadata,
+            model_name="whisper",
+        )
     if not words:
         print("  ⚠️  No se detectó habla. Se generará el video sin subtítulos.")
 
-    # ---- 3. Trim (auto Omni + opcional ajuste manual) ----
+    # ---- 3. Trim + caption (Omni con contexto completo) ----
     start_sec = 0.0
     end_sec = duration
     generated_caption = ""
@@ -2335,11 +2383,14 @@ def process_one_clip(
         or KICK_CHANNEL
         or "canal"
     )
+    clip_category = category_name or "Desconocida"
     suggested = suggest_trim_llm(
         duration,
         video_path=video_path,
         clip_title=clip_title,
         clip_channel=clip_channel,
+        clip_category=clip_category,
+        transcription_words=words,
         just_chatting=just_chatting,
     )
     if suggested:
@@ -2412,11 +2463,18 @@ def process_one_clip(
         # ---- 4. FFmpeg ----
         out_name = f"reel_{video_path.stem}.mp4"
         output_path = OUTPUT_DIR / out_name
+        partial_output_path = output_path.with_name(
+            output_path.stem + ".part" + output_path.suffix
+        )
+        try:
+            partial_output_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
         print(f"\n  🎬 Renderizando con FFmpeg → {out_name}")
         cmd = build_ffmpeg_cmd(
             video_path,
-            output_path,
+            partial_output_path,
             box,
             orig_w,
             orig_h,
@@ -2466,6 +2524,20 @@ def process_one_clip(
             print("  Copiá ese error y pegámelo para arreglarlo.")
             return False
 
+        if (
+            partial_output_path.exists()
+            and partial_output_path.stat().st_size >= MIN_VALID_OUTPUT_BYTES
+        ):
+            try:
+                get_video_info(partial_output_path)
+            except Exception as probe_err:
+                raise RuntimeError(
+                    f"FFmpeg generó un Reel inválido/corrupto: {probe_err}"
+                ) from probe_err
+            os.replace(partial_output_path, output_path)
+        else:
+            raise RuntimeError("FFmpeg terminó sin generar un Reel válido.")
+
         print(f"  ✅ Guardado: {output_path}")
 
         # Mover original a Clips/Usados
@@ -2480,7 +2552,6 @@ def process_one_clip(
                 ass_path.unlink()
             except Exception:
                 pass
-
 
 
 def _parse_clip_timestamp(value: str | None) -> float | None:
@@ -2613,7 +2684,9 @@ def save_clip_registry(registry: dict):
         )
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(registry, f, indent=2, ensure_ascii=False)
-        tmp_path.replace(CLIP_REGISTRY_FILE)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, CLIP_REGISTRY_FILE)
 
 
 PIPELINE_PENDING_STATUSES = {
@@ -2712,7 +2785,15 @@ def _pipeline_stats() -> dict:
     )
 
     # Los fallos de TikTok con pipeline_clip_id ya se reflejan en el registro principal.
-    failed_total = len(failed_ids) + tiktok_failed_orphans
+    failed_total = (
+        len(failed_ids)
+        + tiktok_failed_orphans
+        + sum(
+            1
+            for item in tiktok_items.values()
+            if item.get("status") == "upload_interrupted"
+        )
+    )
 
     return {
         "download_pending": len(pending_ids),
@@ -2886,20 +2967,32 @@ def download_kick_clip(clip: dict, dest_dir: Path) -> Path | None:
     short_id = clip_id.replace("clip_", "")[-12:]
     out_name = f"{created} {safe_title} {short_id}.mp4".strip()
     out_path = dest_dir / out_name
+    partial_path = out_path.with_name(out_path.stem + ".part" + out_path.suffix)
 
-    if out_path.exists() and out_path.stat().st_size >= MIN_VALID_OUTPUT_BYTES:
-        print(f"  ⏭️  Ya existe: {out_name}")
+    def _probe(path: Path) -> bool:
+        if not path.exists() or path.stat().st_size < MIN_VALID_OUTPUT_BYTES:
+            return False
+        try:
+            get_video_info(path)
+            return True
+        except Exception:
+            return False
+
+    if _probe(out_path):
+        print(f"  ⏭️  Ya existe y es válido: {out_name}")
         return out_path
 
-    def _is_valid() -> bool:
-        return out_path.exists() and out_path.stat().st_size >= MIN_VALID_OUTPUT_BYTES
+    if out_path.exists():
+        try:
+            out_path.unlink()
+        except Exception:
+            pass
 
     def _cleanup_partial():
-        if out_path.exists() and not _is_valid():
-            try:
-                out_path.unlink()
-            except Exception:
-                pass
+        try:
+            partial_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     max_attempts = 3
 
@@ -2914,7 +3007,7 @@ def download_kick_clip(clip: dict, dest_dir: Path) -> Path | None:
             "--fragment-retries", "5",
             "--restrict-filenames",
             "-f", "best[ext=mp4]/best",
-            "-o", str(out_path),
+            "-o", str(partial_path),
             video_url,
         ]
     else:
@@ -2940,7 +3033,7 @@ def download_kick_clip(clip: dict, dest_dir: Path) -> Path | None:
                 "-i", video_url,
                 "-c", "copy",
                 "-bsf:a", "aac_adtstoasc",
-                str(out_path),
+                str(partial_path),
             ]
 
         try:
@@ -2959,10 +3052,12 @@ def download_kick_clip(clip: dict, dest_dir: Path) -> Path | None:
                 print(f"  ⚠️  Descarga falló (código {result.returncode}):\n  {tail}")
                 continue
 
-            if not _is_valid():
+            if not _probe(partial_path):
                 print("  ⚠️  La descarga terminó pero el archivo parece inválido/corrupto.")
+                _cleanup_partial()
                 continue
 
+            os.replace(partial_path, out_path)
             print(f"  ✅ Descargado: {out_path.name}")
             return out_path
 
@@ -2999,6 +3094,188 @@ def _register_clip_metadata(clip: dict, registry: dict, **extra):
     }
     fields.update(extra)
     update_clip_registry(registry, clip_id, **fields)
+
+
+def _validate_video_file(path: Path) -> bool:
+    """Valida que un archivo de video sea realmente legible, no solo grande."""
+    try:
+        return (
+            path.exists()
+            and path.stat().st_size >= MIN_VALID_OUTPUT_BYTES
+            and get_video_info(path)[3] > 0
+        )
+    except Exception:
+        return False
+
+
+def _cleanup_interrupted_video_parts(log=print):
+    """Elimina temporales de descargas/renders que quedaron tras una interrupción."""
+    removed = 0
+    for base_dir in (CLIPS_DIR, OUTPUT_DIR):
+        try:
+            candidates = list(base_dir.glob("*.part.mp4"))
+        except Exception:
+            candidates = []
+        for path in candidates:
+            try:
+                path.unlink()
+                removed += 1
+            except Exception as exc:
+                log(f"  ⚠️  No se pudo limpiar temporal {path.name}: {exc}")
+    return removed
+
+
+def recover_pipeline_registry(registry: dict, log=print):
+    """
+    Reconcilia estados transitorios después de un cierre/crash/corte de luz.
+    Nunca trata un archivo parcial como resultado válido.
+    """
+    _cleanup_interrupted_video_parts(log)
+
+    changed = 0
+    for clip_id, record in list(registry.items()):
+        status = record.get("status")
+        downloaded = Path(record["downloaded_path"]) if record.get("downloaded_path") else None
+        output = Path(record["output_path"]) if record.get("output_path") else None
+
+        if status == "processing":
+            if output and _validate_video_file(output):
+                record.update({
+                    "status": "awaiting_tiktok",
+                    "last_error": None,
+                    "failure_stage": None,
+                    "recovery_note": "render ya estaba completo antes del reinicio",
+                    "recovered_at": datetime.now().isoformat(),
+                })
+                changed += 1
+                continue
+
+            if output and output.exists():
+                try:
+                    output.unlink()
+                except Exception:
+                    pass
+
+            if downloaded and _validate_video_file(downloaded):
+                record.update({
+                    "status": "downloaded",
+                    "last_error": "procesamiento interrumpido; se reanudará",
+                    "failure_stage": None,
+                    "last_attempt_at": 0,
+                    "recovered_at": datetime.now().isoformat(),
+                })
+            else:
+                record.update({
+                    "status": "discovered",
+                    "downloaded_path": None,
+                    "last_error": "procesamiento interrumpido y archivo de entrada no disponible",
+                    "failure_stage": "processing",
+                    "last_attempt_at": 0,
+                    "recovered_at": datetime.now().isoformat(),
+                })
+            changed += 1
+            continue
+
+        if status in {"queued", "downloading", "downloaded"}:
+            if downloaded and _validate_video_file(downloaded):
+                if status in {"queued", "downloading"}:
+                    record["status"] = "downloaded"
+                    record["last_error"] = "descarga interrumpida; archivo final válido recuperado"
+                    record["last_attempt_at"] = 0
+                    record["recovered_at"] = datetime.now().isoformat()
+                    changed += 1
+            else:
+                if downloaded and downloaded.exists():
+                    try:
+                        downloaded.unlink()
+                    except Exception:
+                        pass
+                record.update({
+                    "status": "discovered",
+                    "downloaded_path": None,
+                    "last_error": "descarga interrumpida; archivo incompleto o ausente",
+                    "failure_stage": "download",
+                    "last_attempt_at": 0,
+                    "recovered_at": datetime.now().isoformat(),
+                })
+                changed += 1
+            continue
+
+        if status == "processed":
+            if output and _validate_video_file(output):
+                record.update({
+                    "status": "awaiting_tiktok",
+                    "last_error": None,
+                    "failure_stage": None,
+                    "recovery_note": "estado legacy normalizado tras reinicio",
+                    "recovered_at": datetime.now().isoformat(),
+                })
+                changed += 1
+            else:
+                record.update({
+                    "status": "failed",
+                    "failure_stage": "processing",
+                    "last_error": "estado processed sin Reel válido",
+                    "last_attempt_at": time.time(),
+                })
+                changed += 1
+
+    if changed:
+        save_clip_registry(registry)
+        log(f"  ♻️  Recuperación del pipeline: {changed} registro(s) reconciliado(s).")
+    return changed
+
+
+def _reconcile_tiktok_items_with_pipeline(registry: dict, log=print):
+    """Asocia los items de TikTok existentes con su clip de pipeline por output_path."""
+    state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
+    items = state.setdefault("items", {})
+    changed = 0
+
+    by_output = {}
+    for clip_id, record in registry.items():
+        output_path = record.get("output_path")
+        if output_path:
+            by_output[str(Path(output_path).resolve())] = (str(clip_id), record)
+
+    for item in items.values():
+        video_path = str(Path(item.get("video_path", "")).resolve())
+        match = by_output.get(video_path)
+        if not match:
+            continue
+
+        clip_id, record = match
+        if not item.get("pipeline_clip_id"):
+            item["pipeline_clip_id"] = clip_id
+            item["title"] = record.get("title") or item.get("title") or Path(video_path).stem
+            if record.get("generated_caption"):
+                item["caption"] = record["generated_caption"]
+                item["caption_source"] = "omni"
+            changed += 1
+
+        if item.get("status") in {"uploaded", "draft_saved"}:
+            record.update({
+                "status": "completed",
+                "completed_at": item.get("uploaded_at") or datetime.now().isoformat(),
+                "last_error": None,
+                "failure_stage": None,
+            })
+            changed += 1
+        elif item.get("status") == "failed":
+            record.update({
+                "status": "failed",
+                "failure_stage": "tiktok",
+                "last_error": item.get("last_error"),
+                "last_attempt_at": time.time(),
+            })
+            changed += 1
+
+    if changed:
+        with PIPELINE_REGISTRY_LOCK:
+            save_clip_registry(registry)
+        with TIKTOK_STATE_LOCK:
+            guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
+    return changed
 
 
 def watch_kick_clips(stop_event=None, on_processed=None):
@@ -3043,6 +3320,8 @@ def watch_kick_clips(stop_event=None, on_processed=None):
     registry = load_clip_registry()
     PIPELINE_REGISTRY = registry
     print(f"  Registros conocidos: {len(registry)}")
+    recover_pipeline_registry(registry)
+    _reconcile_tiktok_items_with_pipeline(registry)
 
     def registry_update(clip_id: str, **fields):
         with PIPELINE_REGISTRY_LOCK:
@@ -3061,6 +3340,12 @@ def watch_kick_clips(stop_event=None, on_processed=None):
             path = Path(job.get("local_path", ""))
 
             try:
+                with PIPELINE_REGISTRY_LOCK:
+                    current_status = registry.get(clip_id, {}).get("status")
+                if current_status in {"completed", "duplicate", "awaiting_tiktok"}:
+                    print(f"  ⏭️  Trabajo obsoleto ignorado: {clip_id} ({current_status})")
+                    continue
+
                 if not path.exists():
                     registry_update(
                         clip_id,
@@ -3531,7 +3816,6 @@ def watch_kick_clips(stop_event=None, on_processed=None):
     PIPELINE_REGISTRY = None
 
 
-
 # ============================================================
 # TikTok uploader helpers (integrados)
 # ============================================================
@@ -3752,7 +4036,6 @@ def manejar_dialogo_salida(page):
     except Exception:
         pass
     return False
-
 
 
 def subir_video(
@@ -4221,7 +4504,6 @@ def _subir_video_intento(
                 browser.close()
 
 
-
 # ============================================================
 # TIKTOK: SUBIDA AUTOMÁTICA
 # ============================================================
@@ -4240,7 +4522,9 @@ def guardar_json(path: Path, data):
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    tmp.replace(path)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 def _caption_for_clip(clip: dict) -> str:
     title = (clip.get("title") or "Nuevo clip").strip()
@@ -4284,10 +4568,34 @@ class TikTokUploadManager:
         self.log_callback(msg)
 
     def load_state(self):
-        return cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
+        with TIKTOK_STATE_LOCK:
+            return cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
 
     def save_state(self, state):
-        guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
+        with TIKTOK_STATE_LOCK:
+            guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
+
+    def recover_interrupted_uploads(self):
+        """Bloquea subidas que estaban en curso al reiniciar para impedir duplicados."""
+        with TIKTOK_STATE_LOCK:
+            state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
+            changed = 0
+            for item in state.setdefault("items", {}).values():
+                if item.get("status") == "uploading":
+                    item["status"] = "upload_interrupted"
+                    item["requires_manual_review"] = True
+                    item["interrupted_at"] = datetime.now().isoformat()
+                    item["last_error"] = (
+                        "La aplicación se reinició mientras TikTok estaba procesando esta subida. "
+                        "No se reintentará automáticamente para evitar un Reel duplicado."
+                    )
+                    item["scheduled_at"] = None
+                    changed += 1
+            if changed:
+                guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
+        if changed:
+            self.log(f"  🛡️  TikTok: {changed} subida(s) interrumpida(s) quedaron bloqueadas para evitar duplicados.")
+        return changed
 
     def enqueue(self, video_path: Path, clip: dict | None = None):
         video_path = Path(video_path)
@@ -4305,6 +4613,7 @@ class TikTokUploadManager:
             "draft_saved",
             "queued",
             "uploading",
+            "upload_interrupted",
         }:
             # El Reel puede haber sido descubierto antes de que el watcher
             # terminara de procesar el clip original. En ese caso asociamos
@@ -4385,6 +4694,7 @@ class TikTokUploadManager:
     def start(self):
         if self.thread and self.thread.is_alive():
             return
+        self.recover_interrupted_uploads()
         self.stop_event.clear()
         self.wake_event.clear()
         self.thread = threading.Thread(
@@ -4427,6 +4737,10 @@ class TikTokUploadManager:
 
             item = pending[0]
             video_path = Path(item["video_path"])
+
+            # El estado se persiste ANTES de tocar TikTok. Si el proceso muere
+            # después de esto, el próximo arranque lo convertirá en
+            # upload_interrupted y NO lo volverá a subir automáticamente.
             publish_mode = item.get(
                 "publish_mode",
                 "publish" if TIKTOK_AUTO_UPLOAD else "draft",
@@ -4484,7 +4798,6 @@ class TikTokUploadManager:
                     f"❌ TikTok: falló {video_path.name} al {action_text}. "
                     "Queda en FALLIDO hasta reintentar desde la interfaz."
                 )
-
 
 
 # ============================================================
@@ -5093,7 +5406,7 @@ class TikTokClipAutomationApp:
         self._label(smart_body, "Automatización inteligente", size=15, bold=True).pack(anchor="w")
         self._label(
             smart_body,
-            "Configurá el modo especial de Just Chatting y el fallback de subtítulos cuando Whisper falle.",
+            "Configurá el modo especial de Just Chatting. La transcripción siempre se realiza con Whisper.",
             size=11,
             color=self.MUTED,
             wraplength=760,
@@ -5112,39 +5425,7 @@ class TikTokClipAutomationApp:
             button_hover_color=self.ACCENT_HOVER,
         ).pack(anchor="w", pady=3)
 
-        transcription_row = self.ctk.CTkFrame(smart_body, fg_color="transparent")
-        transcription_row.pack(fill="x", pady=(3, 5))
-        self._label(
-            transcription_row,
-            "Modelo de subtítulos:",
-            size=10,
-            color=self.MUTED,
-            width=140,
-            anchor="w",
-        ).pack(side="left")
-
         self.transcription_model_var = tk.StringVar(value="Whisper")
-        self.transcription_model_menu = self.ctk.CTkOptionMenu(
-            transcription_row,
-            values=["Whisper", "Nemotron Omni"],
-            variable=self.transcription_model_var,
-            width=190,
-            height=34,
-            fg_color=self.CARD_ALT,
-            button_color=self.ACCENT,
-            button_hover_color=self.ACCENT_HOVER,
-            command=self._on_transcription_model_change,
-        )
-        self.transcription_model_menu.pack(side="left")
-
-        self._label(
-            transcription_row,
-            "Whisper es el predeterminado. Si falla completamente, Omni toma el relevo automáticamente.",
-            size=10,
-            color=self.MUTED,
-            wraplength=610,
-            justify="left",
-        ).pack(side="left", padx=12)
 
         retention_row = self.ctk.CTkFrame(smart_body, fg_color="transparent")
         retention_row.pack(fill="x", pady=(7, 2))
@@ -5401,10 +5682,6 @@ class TikTokClipAutomationApp:
 
     def _on_caption_mode_change(self, value):
         self.caption_mode_var.set(value)
-
-    def _on_transcription_model_change(self, value):
-        self.transcription_model_var.set(value)
-
 
     def _make_performance_row(self, parent):
         row = self.ctk.CTkFrame(parent, fg_color="transparent")
@@ -5685,7 +5962,6 @@ class TikTokClipAutomationApp:
             "TIKTOK_PROCESSING_TIMEOUT_SECONDS",
             "TIKTOK_CONFIRM_TIMEOUT_SECONDS",
             "JUST_CHATTING_MODE_ENABLED",
-            "TRANSCRIPTION_MODEL",
             "JUST_CHATTING_RETENTION_DIR",
         ]
         defaults = {
@@ -5709,12 +5985,6 @@ class TikTokClipAutomationApp:
             self.just_chatting_mode_var.set(
                 env_bool("JUST_CHATTING_MODE_ENABLED", True)
             )
-        if hasattr(self, "transcription_model_var"):
-            transcription_model = env_value("TRANSCRIPTION_MODEL", "whisper").strip().lower()
-            self.transcription_model_var.set(
-                "Nemotron Omni" if transcription_model == "omni" else "Whisper"
-            )
-
         caption_mode = env_value("TIKTOK_CAPTION_MODE", "template").strip().lower()
         self.caption_mode_var.set(
             "IA · Omni"
@@ -5780,11 +6050,6 @@ class TikTokClipAutomationApp:
                 "TIKTOK_PROCESSING_TIMEOUT_SECONDS": self.entry_vars.get("TIKTOK_PROCESSING_TIMEOUT_SECONDS", tk.StringVar(value="180")).get().strip(),
                 "TIKTOK_CONFIRM_TIMEOUT_SECONDS": self.entry_vars.get("TIKTOK_CONFIRM_TIMEOUT_SECONDS", tk.StringVar(value="90")).get().strip(),
                 "JUST_CHATTING_MODE_ENABLED": "true" if self.just_chatting_mode_var.get() else "false",
-                "TRANSCRIPTION_MODEL": (
-                    "omni"
-                    if self.transcription_model_var.get() == "Nemotron Omni"
-                    else "whisper"
-                ),
                 "JUST_CHATTING_RETENTION_DIR": self._config_path_value("JUST_CHATTING_RETENTION_DIR"),
             }
 
@@ -6317,12 +6582,11 @@ class TikTokClipAutomationApp:
             pass
 
 
-
 def reload_config_from_env():
     # Releer el archivo por si fue editado fuera de la GUI.
     load_dotenv(ENV_FILE, override=True)
 
-    global CLIPS_DIR, OUTPUT_DIR, USED_DIR, USED_DIR_RAW, DIVIDER_PATH, FONT_PATH, CLIP_REGISTRY_FILE
+    global CLIPS_DIR, OUTPUT_DIR, USED_DIR, USED_DIR_RAW, DIVIDER_PATH, FONT_PATH, CLIP_REGISTRY_FILE, TRANSCRIPT_DIR
     global TARGET_W, TARGET_H, DIVIDER_H
     global SUB_SIZE, SUB_Y_OFFSET, SUB_MAX_WORDS, SUB_COLOR, SUB_BORDER, SUB_BORDER_WIDTH
     global FACE_MAX_RETRIES_KIMI, FACE_FALLBACK_MODEL, FACE_KIMI_MODEL, FACE_KIMI_TIMEOUT, FACE_FALLBACK_TIMEOUT
@@ -6340,7 +6604,7 @@ def reload_config_from_env():
     global TIKTOK_PROCESSING_TIMEOUT_SECONDS, TIKTOK_CONFIRM_TIMEOUT_SECONDS
     global TIKTOK_UPLOAD_CHECK_SECONDS, FFMPEG_PRIORITY, FFMPEG_THREADS
     global TIKTOK_CAPTION_MODE, TIKTOK_CAPTION_TEMPLATE, TIKTOK_HASHTAGS, TIKTOK_UPLOAD_REGISTRY
-    global JUST_CHATTING_MODE_ENABLED, JUST_CHATTING_RETENTION_DIR, TRANSCRIPTION_MODEL
+    global JUST_CHATTING_MODE_ENABLED, JUST_CHATTING_RETENTION_DIR
 
     CLIPS_DIR = resolve_path(env_value("CLIPS_DIR", DEFAULT_RELATIVE_PATHS["CLIPS_DIR"]))
     OUTPUT_DIR = resolve_path(env_value("OUTPUT_DIR", DEFAULT_RELATIVE_PATHS["OUTPUT_DIR"]))
@@ -6349,6 +6613,9 @@ def reload_config_from_env():
     DIVIDER_PATH = resolve_path(env_value("DIVIDER_PATH", DEFAULT_RELATIVE_PATHS["DIVIDER_PATH"]))
     FONT_PATH = resolve_path(env_value("FONT_PATH", DEFAULT_RELATIVE_PATHS["FONT_PATH"]))
     CLIP_REGISTRY_FILE = resolve_path(env_value("CLIP_REGISTRY_FILE", DEFAULT_RELATIVE_PATHS["CLIP_REGISTRY_FILE"]))
+    TRANSCRIPT_DIR = resolve_path(
+        env_value("TRANSCRIPT_DIR", DEFAULT_RELATIVE_PATHS["TRANSCRIPT_DIR"])
+    )
 
     TARGET_W = env_int("TARGET_W", 1080)
     TARGET_H = env_int("TARGET_H", 1920)
@@ -6448,9 +6715,6 @@ def reload_config_from_env():
     )
 
     JUST_CHATTING_MODE_ENABLED = env_bool("JUST_CHATTING_MODE_ENABLED", True)
-    TRANSCRIPTION_MODEL = env_value("TRANSCRIPTION_MODEL", "whisper").strip().lower()
-    if TRANSCRIPTION_MODEL not in {"whisper", "omni"}:
-        TRANSCRIPTION_MODEL = "whisper"
     JUST_CHATTING_RETENTION_DIR = resolve_path(
         env_value(
             "JUST_CHATTING_RETENTION_DIR",
