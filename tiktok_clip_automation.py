@@ -4825,9 +4825,76 @@ class TikTokClipAutomationApp:
         )
         self.headless_switch.pack(anchor="w", pady=3)
 
+        smart_card = self._frame(scroll, fg_color=self.CARD)
+        smart_card.pack(fill="x", pady=6, padx=4)
+        self._label(smart_card, "5", size=14, color=self.ACCENT, bold=True).pack(
+            side="left", padx=(18, 10), pady=16
+        )
+        smart_body = self.ctk.CTkFrame(smart_card, fg_color="transparent")
+        smart_body.pack(fill="both", expand=True, padx=(0, 18), pady=14)
+        self._label(smart_body, "Automatización inteligente", size=15, bold=True).pack(anchor="w")
+        self._label(
+            smart_body,
+            "Configurá el modo especial de Just Chatting y el fallback de subtítulos cuando Whisper falle.",
+            size=11,
+            color=self.MUTED,
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", pady=(3, 10))
+
+        self.just_chatting_mode_var = tk.BooleanVar(value=True)
+        self.ctk.CTkSwitch(
+            smart_body,
+            text="Modo especial Just Chatting (omitir FaceCam + video de retención)",
+            variable=self.just_chatting_mode_var,
+            onvalue=True,
+            offvalue=False,
+            progress_color=self.ACCENT,
+            button_color=self.ACCENT,
+            button_hover_color=self.ACCENT_HOVER,
+        ).pack(anchor="w", pady=3)
+
+        self.kimi_fallback_var = tk.BooleanVar(value=True)
+        self.ctk.CTkSwitch(
+            smart_body,
+            text="Fallback de subtítulos con Kimi cuando Whisper falla",
+            variable=self.kimi_fallback_var,
+            onvalue=True,
+            offvalue=False,
+            progress_color=self.ACCENT,
+            button_color=self.ACCENT,
+            button_hover_color=self.ACCENT_HOVER,
+        ).pack(anchor="w", pady=3)
+
+        retention_row = self.ctk.CTkFrame(smart_body, fg_color="transparent")
+        retention_row.pack(fill="x", pady=(7, 2))
+        self._label(
+            retention_row,
+            "Videos para retención:",
+            size=10,
+            color=self.MUTED,
+            width=140,
+            anchor="w",
+        ).pack(side="left")
+        retention_var = self._ensure_var(
+            "JUST_CHATTING_RETENTION_DIR",
+            DEFAULT_RELATIVE_PATHS["JUST_CHATTING_RETENTION_DIR"],
+        )
+        self.ctk.CTkEntry(
+            retention_row,
+            textvariable=retention_var,
+            height=34,
+        ).pack(side="left", fill="x", expand=True, padx=(0, 7))
+        self._button(
+            retention_row,
+            "Examinar",
+            lambda: self._choose_directory("JUST_CHATTING_RETENTION_DIR"),
+            width=88,
+        ).pack(side="left")
+
         self._setup_card(
             scroll,
-            "5",
+            "6",
             "Rendimiento",
             "FFmpeg se ejecuta con prioridad muy baja y con menos hilos para que el PC del streamer siga usable.",
             self._make_performance_row,
@@ -4836,7 +4903,7 @@ class TikTokClipAutomationApp:
 
         self._setup_card(
             scroll,
-            "6",
+            "7",
             "Rutas y herramientas",
             "Las rutas estándar se configuran automáticamente como relativas a la carpeta de TTCA y sus carpetas se crean al iniciar. También podés elegir una ubicación externa.",
             self._make_paths_form,
@@ -5334,6 +5401,9 @@ class TikTokClipAutomationApp:
             "TIKTOK_UPLOAD_RETRIES",
             "TIKTOK_PROCESSING_TIMEOUT_SECONDS",
             "TIKTOK_CONFIRM_TIMEOUT_SECONDS",
+            "JUST_CHATTING_MODE_ENABLED",
+            "KIMI_WHISPER_FALLBACK_ENABLED",
+            "JUST_CHATTING_RETENTION_DIR",
         ]
         defaults = {
             "CLIPS_DIR": DEFAULT_RELATIVE_PATHS["CLIPS_DIR"],
@@ -5344,6 +5414,7 @@ class TikTokClipAutomationApp:
             "WHISPER_CPP_EXE": DEFAULT_RELATIVE_PATHS["WHISPER_CPP_EXE"],
             "WHISPER_CPP_MODEL": DEFAULT_RELATIVE_PATHS["WHISPER_CPP_MODEL"],
             "TIKTOK_COOKIES_FILE": DEFAULT_RELATIVE_PATHS["TIKTOK_COOKIES_FILE"],
+            "JUST_CHATTING_RETENTION_DIR": DEFAULT_RELATIVE_PATHS["JUST_CHATTING_RETENTION_DIR"],
         }
         for key in keys:
             var = self._ensure_var(key)
@@ -5351,6 +5422,14 @@ class TikTokClipAutomationApp:
 
         self.auto_upload_var.set(env_bool("TIKTOK_AUTO_UPLOAD", True))
         self.headless_var.set(env_bool("TIKTOK_HEADLESS", True))
+        if hasattr(self, "just_chatting_mode_var"):
+            self.just_chatting_mode_var.set(
+                env_bool("JUST_CHATTING_MODE_ENABLED", True)
+            )
+        if hasattr(self, "kimi_fallback_var"):
+            self.kimi_fallback_var.set(
+                env_bool("KIMI_WHISPER_FALLBACK_ENABLED", True)
+            )
 
         caption_mode = env_value("TIKTOK_CAPTION_MODE", "template").strip().lower()
         self.caption_mode_var.set(
@@ -5416,6 +5495,9 @@ class TikTokClipAutomationApp:
                 "TIKTOK_UPLOAD_RETRIES": self.entry_vars.get("TIKTOK_UPLOAD_RETRIES", tk.StringVar(value="3")).get().strip(),
                 "TIKTOK_PROCESSING_TIMEOUT_SECONDS": self.entry_vars.get("TIKTOK_PROCESSING_TIMEOUT_SECONDS", tk.StringVar(value="180")).get().strip(),
                 "TIKTOK_CONFIRM_TIMEOUT_SECONDS": self.entry_vars.get("TIKTOK_CONFIRM_TIMEOUT_SECONDS", tk.StringVar(value="90")).get().strip(),
+                "JUST_CHATTING_MODE_ENABLED": "true" if self.just_chatting_mode_var.get() else "false",
+                "KIMI_WHISPER_FALLBACK_ENABLED": "true" if self.kimi_fallback_var.get() else "false",
+                "JUST_CHATTING_RETENTION_DIR": self._config_path_value("JUST_CHATTING_RETENTION_DIR"),
             }
 
             for key, value in values.items():
@@ -5935,6 +6017,7 @@ def reload_config_from_env():
     global TIKTOK_PROCESSING_TIMEOUT_SECONDS, TIKTOK_CONFIRM_TIMEOUT_SECONDS
     global TIKTOK_UPLOAD_CHECK_SECONDS, FFMPEG_PRIORITY, FFMPEG_THREADS
     global TIKTOK_CAPTION_MODE, TIKTOK_CAPTION_TEMPLATE, TIKTOK_HASHTAGS, TIKTOK_UPLOAD_REGISTRY
+    global JUST_CHATTING_MODE_ENABLED, JUST_CHATTING_RETENTION_DIR, KIMI_WHISPER_FALLBACK_ENABLED
 
     CLIPS_DIR = resolve_path(env_value("CLIPS_DIR", DEFAULT_RELATIVE_PATHS["CLIPS_DIR"]))
     OUTPUT_DIR = resolve_path(env_value("OUTPUT_DIR", DEFAULT_RELATIVE_PATHS["OUTPUT_DIR"]))
@@ -6039,6 +6122,15 @@ def reload_config_from_env():
     )
     TIKTOK_UPLOAD_REGISTRY = resolve_path(
         env_value("TIKTOK_UPLOAD_REGISTRY", DEFAULT_RELATIVE_PATHS["TIKTOK_UPLOAD_REGISTRY"])
+    )
+
+    JUST_CHATTING_MODE_ENABLED = env_bool("JUST_CHATTING_MODE_ENABLED", True)
+    KIMI_WHISPER_FALLBACK_ENABLED = env_bool("KIMI_WHISPER_FALLBACK_ENABLED", True)
+    JUST_CHATTING_RETENTION_DIR = resolve_path(
+        env_value(
+            "JUST_CHATTING_RETENTION_DIR",
+            DEFAULT_RELATIVE_PATHS["JUST_CHATTING_RETENTION_DIR"],
+        )
     )
 
 
