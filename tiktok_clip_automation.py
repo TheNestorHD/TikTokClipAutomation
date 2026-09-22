@@ -1726,6 +1726,9 @@ No agregues Markdown, comentarios ni texto fuera del JSON.
         "max_tokens": 4096,
         "temperature": 0.0,
         "stream": False,
+        "chat_template_kwargs": {
+            "enable_thinking": False,
+        },
     }
 
     response = requests.post(
