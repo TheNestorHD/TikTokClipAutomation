@@ -3140,6 +3140,27 @@ def recover_pipeline_registry(registry: dict, log=print):
         if output is None and downloaded is not None:
             output = OUTPUT_DIR / f"reel_{downloaded.stem}.mp4"
 
+        # Si el Reel final ya existe y es válido, eso es evidencia suficiente
+        # para no volver a renderizar aunque el registro haya quedado atrasado
+        # por un crash justo antes de guardar el estado.
+        if (
+            output
+            and _validate_video_file(output)
+            and status not in {"completed", "duplicate"}
+            and record.get("failure_stage") != "tiktok"
+        ):
+            record["output_path"] = str(output)
+            if status != "awaiting_tiktok":
+                record.update({
+                    "status": "awaiting_tiktok",
+                    "last_error": None,
+                    "failure_stage": None,
+                    "recovery_note": "Reel final válido encontrado durante la recuperación",
+                    "recovered_at": datetime.now().isoformat(),
+                })
+                changed += 1
+            continue
+
         if status == "processing":
             if output and _validate_video_file(output):
                 record.update({
@@ -5502,8 +5523,6 @@ class TikTokClipAutomationApp:
             button_color=self.ACCENT,
             button_hover_color=self.ACCENT_HOVER,
         ).pack(anchor="w", pady=3)
-
-        self.transcription_model_var = tk.StringVar(value="Whisper")
 
         retention_row = self.ctk.CTkFrame(smart_body, fg_color="transparent")
         retention_row.pack(fill="x", pady=(7, 2))
