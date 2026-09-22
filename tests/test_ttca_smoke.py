@@ -67,6 +67,8 @@ def load_functions():
     assert 'page.keyboard.insert_text(caption)' in source
     assert 'desc.inner_text(timeout=1000)' in source
     assert 'Forzamos blur' in source
+    assert '_wait_for_tiktok_upload_quiet' in source
+    assert 'Subidas internas de TikTok estabilizadas' in source
     assert 'REQUEST FAILED' in source
 
     tree = ast.parse(source, filename=str(SOURCE))
