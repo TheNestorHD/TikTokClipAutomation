@@ -2091,7 +2091,8 @@ def build_ffmpeg_cmd(
 
         cmd += ["-i", str(video_path)]
         if has_divider:
-            cmd += ["-i", str(DIVIDER_PATH)]
+            # El divisor es un PNG estático: repetilo durante toda la duración del Reel.
+            cmd += ["-loop", "1", "-i", str(DIVIDER_PATH)]
 
         # Loops para cubrir toda la duración del clip principal.
         cmd += ["-stream_loop", "-1", "-i", str(gameplay_path)]
