@@ -2603,6 +2603,79 @@ def save_clip_registry(registry: dict):
         tmp_path.replace(CLIP_REGISTRY_FILE)
 
 
+PIPELINE_PENDING_STATUSES = {
+    "queued",
+    "downloading",
+    "downloaded",
+    "processing",
+    "awaiting_tiktok",
+}
+PIPELINE_PROCESS_PENDING_STATUSES = {
+    "queued",
+    "downloading",
+    "downloaded",
+    "processing",
+    "awaiting_tiktok",
+}
+
+
+def _pipeline_stats() -> dict:
+    """Calcula indicadores persistentes del pipeline sin depender de Queue.qsize()."""
+    registry = PIPELINE_REGISTRY if PIPELINE_REGISTRY is not None else load_clip_registry()
+    registry = registry or {}
+
+    pending_ids = {
+        str(clip_id)
+        for clip_id, record in registry.items()
+        if record.get("status") in PIPELINE_PENDING_STATUSES
+    }
+    process_pending = {
+        str(clip_id)
+        for clip_id, record in registry.items()
+        if record.get("status") in PIPELINE_PROCESS_PENDING_STATUSES
+    }
+    failed_ids = {
+        str(clip_id)
+        for clip_id, record in registry.items()
+        if record.get("status") == "failed"
+    }
+
+    tiktok_state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
+    tiktok_items = tiktok_state.get("items", {}) or {}
+    tiktok_pending = {
+        str(item.get("pipeline_clip_id"))
+        for item in tiktok_items.values()
+        if item.get("status") in {"queued", "uploading"}
+        and item.get("pipeline_clip_id")
+    }
+    tiktok_failed_orphans = sum(
+        1
+        for item in tiktok_items.values()
+        if item.get("status") == "failed"
+        and not item.get("pipeline_clip_id")
+    )
+
+    # Un clip en awaiting_tiktok/queued/uploading sigue pendiente hasta que
+    # TikTok confirme éxito o fallo. Los fallos terminales no cuentan como pendientes.
+    tiktok_pending_total = len(tiktok_pending)
+    tiktok_pending_total += sum(
+        1
+        for item in tiktok_items.values()
+        if item.get("status") in {"queued", "uploading"}
+        and not item.get("pipeline_clip_id")
+    )
+
+    # Los fallos de TikTok con pipeline_clip_id ya se reflejan en el registro principal.
+    failed_total = len(failed_ids) + tiktok_failed_orphans
+
+    return {
+        "download_pending": len(pending_ids),
+        "process_pending": len(process_pending),
+        "tiktok_pending": tiktok_pending_total,
+        "failed": failed_total,
+    }
+
+
 def update_clip_registry(registry: dict, clip_id: str, **fields):
     # "clip_id" se guarda dentro del registro, pero no puede entrar dos veces
     # como argumento y como **fields.
@@ -2622,10 +2695,13 @@ def _clip_is_retryable(record: dict) -> bool:
     if status not in {"discovered", "failed", "processing"}:
         return False
 
-    # Los clips "discovered" (recién detectados o reseteados por archivo faltante)
-    # no tienen cooldown: el cooldown es solo para errores reales de proceso.
     if status == "discovered":
         return True
+
+    # Los fallos de TikTok son terminales en el pipeline de edición: se reintentan
+    # exclusivamente desde la cola de TikTok, no volviendo a renderizar el clip.
+    if record.get("failure_stage") == "tiktok":
+        return False
 
     last_attempt = float(record.get("last_attempt_at", 0))
     return (time.time() - last_attempt) >= FAILED_RETRY_SECONDS
