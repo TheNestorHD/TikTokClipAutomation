@@ -3555,16 +3555,44 @@ def cerrar_popups(page):
         'button[aria-label="close"]',
     ]
 
-    try:
-        modal_visible = any(
-            page.locator(sel).is_visible(timeout=500)
-            for sel in modal_selectores
-        )
-        if modal_visible:
-            for sel in modal_boton_selectores:
-                try:
-                    btn = page.locator(sel).last
-                    if not btn.is_visible(timeout=700):
+    # Buscamos cada variante por separado. No usamos any(...) sobre
+    # locators directamente porque un selector inexistente puede lanzar
+    # una excepción y ocultar el resto del manejo del modal.
+    modal_roots = []
+    for sel in modal_selectores:
+        try:
+            marker = page.locator(sel).first
+            if not marker.is_visible(timeout=500):
+                continue
+
+            # El log real de TikTok muestra el modal dentro de un
+            # data-floating-ui-portal; usamos ese contenedor para no pulsar
+            # accidentalmente un botón del resto de la página.
+            root = marker.locator(
+                "xpath=ancestor::*[@data-floating-ui-portal][1]"
+            )
+            if root.count() == 0:
+                root = marker.locator(
+                    "xpath=ancestor::*[@role='dialog'][1]"
+                )
+            if root.count() == 0:
+                root = marker.locator("xpath=..")
+
+            modal_roots.append(root)
+            break
+        except Exception:
+            continue
+
+    for root in modal_roots:
+        cerrado = False
+
+        for sel in modal_boton_selectores:
+            try:
+                buttons = root.locator(sel)
+                count = buttons.count()
+                for i in range(count):
+                    btn = buttons.nth(i)
+                    if not btn.is_visible(timeout=500):
                         continue
 
                     disabled = (
@@ -3575,12 +3603,42 @@ def cerrar_popups(page):
                     if str(disabled).lower() in {"true", "1"}:
                         continue
 
-                    btn.click(timeout=2500)
-                    print(f"  → Cerrado modal de comprobaciones automáticas: {sel}")
+                    try:
+                        btn.click(timeout=2500)
+                    except Exception:
+                        btn.evaluate("el => el.click()")
+
+                    print(
+                        f"  → Cerrado modal de comprobaciones automáticas: {sel}"
+                    )
                     time.sleep(0.8)
+                    cerrado = True
                     break
-                except Exception:
-                    continue
+                if cerrado:
+                    break
+            except Exception:
+                continue
+
+        if not cerrado:
+            # Fallback seguro para modales de TikTok que usan el mismo portal
+            # pero no exponen el texto del botón esperado.
+            try:
+                page.keyboard.press("Escape")
+                time.sleep(0.8)
+                print("  → Cerrado modal de comprobaciones automáticas con Escape")
+            except Exception:
+                pass
+
+    # Confirmamos que el modal no siga bloqueando la interfaz.
+    try:
+        for sel in modal_selectores:
+            try:
+                if page.locator(sel).first.is_visible(timeout=250):
+                    page.keyboard.press("Escape")
+                    time.sleep(0.5)
+                    break
+            except Exception:
+                continue
     except Exception:
         pass
 
@@ -3784,6 +3842,7 @@ def _subir_video_intento(
                 try:
                     btn = page.locator(
                         'button[data-e2e="post_video_button"], '
+                        'button[data-e2e="save_draft_button"], '
                         'button:has-text("Post"), '
                         'button:has-text("Save draft"), '
                         'button:has-text("Guardar borrador")'
@@ -3820,9 +3879,47 @@ def _subir_video_intento(
             cerrar_popups(page)
 
             print("→ Escribiendo descripción...")
+            cerrar_popups(page)
             desc = page.locator('div[contenteditable="true"]').first
             desc.wait_for(state="visible", timeout=20000)
-            desc.click()
+
+            # El modal de comprobaciones automáticas puede aparecer justo
+            # después de que el video termina de procesarse. Si todavía existe,
+            # esperamos/cerramos antes de intentar enfocar el editor.
+            for _ in range(3):
+                bloqueado = False
+                for modal_sel in [
+                    'text="Turn on automatic content checks?"',
+                    'text="Turn on automatic content checks"',
+                    'text="Automatic content checks"',
+                    'text="¿Activar las comprobaciones automáticas de contenido?"',
+                ]:
+                    try:
+                        if page.locator(modal_sel).first.is_visible(timeout=250):
+                            bloqueado = True
+                            break
+                    except Exception:
+                        continue
+
+                if not bloqueado:
+                    break
+
+                cerrar_popups(page)
+                time.sleep(0.6)
+
+            try:
+                desc.click(timeout=5000)
+            except Exception:
+                # Último intento: si TikTok aún mantiene alguna capa visual
+                # residual, forzamos el click después de limpiar los popups.
+                cerrar_popups(page)
+                try:
+                    page.keyboard.press("Escape")
+                    time.sleep(0.5)
+                except Exception:
+                    pass
+                desc.click(timeout=5000, force=True)
+
             time.sleep(0.4)
             page.keyboard.press("Control+A")
             page.keyboard.press("Backspace")
