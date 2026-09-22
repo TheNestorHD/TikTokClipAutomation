@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.4.7"
+APP_VERSION = "0.4.8"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -4274,6 +4274,27 @@ def _subir_video_intento(
         )
 
         try:
+            # Diagnóstico del runtime de TikTok: errores JavaScript y mensajes de consola
+            # que pueden impedir que un botón React ejecute su handler sin que Playwright
+            # considere que hubo un error de interacción.
+            try:
+                page.on(
+                    "pageerror",
+                    lambda exc: print(
+                        f"  🌐 PAGE ERROR: {str(exc)[:500]}"
+                    ),
+                )
+                page.on(
+                    "console",
+                    lambda msg: (
+                        print(f"  🌐 CONSOLE {msg.type}: {msg.text[:500]}")
+                        if msg.type in {"error", "warning"}
+                        else None
+                    ),
+                )
+            except Exception:
+                pass
+
             if not TIKTOK_COOKIES_FILE.exists():
                 raise FileNotFoundError(
                     f"No existe el archivo de cookies: {TIKTOK_COOKIES_FILE}"
@@ -4500,9 +4521,9 @@ def _subir_video_intento(
                 except Exception:
                     pass
 
-                # TikTok Studio usa un botón React real. Un click DOM puede no
-                # reproducir exactamente la interacción que espera el footer, por lo
-                # que primero usamos coordenadas físicas sobre el centro del botón.
+                # TikTok Studio usa un botón React real. Antes de seguir probando
+                # variantes ciegas de click, inspeccionamos el objetivo real y usamos
+                # también activación por teclado.
                 save_network_events = []
 
                 def _log_save_response(response):
@@ -4552,37 +4573,103 @@ def _subir_video_intento(
                         return {"error": str(exc).splitlines()[0]}
 
                 before_state = _draft_button_state()
-                print(f"  Estado antes del click: {before_state}")
+                print(f"  Estado antes de activar: {before_state}")
 
-                clicked = False
-                click_method = ""
-
-                # 1) Interacción física sobre el centro del botón.
+                # Inspeccionamos qué nodo está realmente bajo el centro del botón.
                 try:
                     box = draft_btn.bounding_box()
                     if box:
                         x = box["x"] + box["width"] / 2
                         y = box["y"] + box["height"] / 2
-                        page.mouse.move(x, y)
-                        time.sleep(0.15)
-                        page.mouse.down()
-                        time.sleep(0.08)
-                        page.mouse.up()
-                        clicked = True
-                        click_method = "mouse coordinates"
-                        print(
-                            f"  → Click físico enviado en "
-                            f"({x:.0f}, {y:.0f})"
+                        hit = page.evaluate(
+                            """({x, y}) => {
+                                const el = document.elementFromPoint(x, y);
+                                if (!el) return null;
+                                const chain = [];
+                                let node = el;
+                                for (let i = 0; i < 6 && node; i++, node = node.parentElement) {
+                                    chain.push({
+                                        tag: node.tagName,
+                                        id: node.id || "",
+                                        className: typeof node.className === "string"
+                                            ? node.className.slice(0, 180)
+                                            : "",
+                                        role: node.getAttribute("role"),
+                                        e2e: node.getAttribute("data-e2e"),
+                                        text: (node.innerText || "").trim().slice(0, 100)
+                                    });
+                                }
+                                return {x, y, chain};
+                            }""",
+                            {"x": x, "y": y},
                         )
-                except Exception as mouse_error:
+                        print(f"  🎯 Elemento bajo el botón: {hit}")
+                except Exception as hit_error:
                     print(
-                        "  ⚠️  Click físico falló: "
-                        f"{str(mouse_error).splitlines()[0]}"
+                        "  ⚠️  No se pudo inspeccionar el punto del botón: "
+                        f"{str(hit_error).splitlines()[0]}"
                     )
 
+                clicked = False
+                click_method = ""
+
+                # 1) Activación de teclado. Una vez enfocado el <button> real,
+                # Enter genera el click nativo sin depender de hit-testing.
+                try:
+                    draft_btn.focus(timeout=2000)
+                    active = page.evaluate(
+                        """() => {
+                            const el = document.activeElement;
+                            return el ? {
+                                tag: el.tagName,
+                                e2e: el.getAttribute("data-e2e"),
+                                text: (el.innerText || "").trim().slice(0, 100)
+                            } : null;
+                        }"""
+                    )
+                    print(f"  ⌨️  Elemento enfocado: {active}")
+                    page.keyboard.press("Enter")
+                    clicked = True
+                    click_method = "keyboard Enter"
+                    print("  → Enter enviado al botón Guardar borrador")
+                except Exception as keyboard_error:
+                    print(
+                        "  ⚠️  Activación por teclado falló: "
+                        f"{str(keyboard_error).splitlines()[0]}"
+                    )
+
+                # 2) Click físico como fallback.
                 if not clicked:
                     try:
-                        draft_btn.click(timeout=4000, force=True, no_wait_after=True)
+                        box = draft_btn.bounding_box()
+                        if box:
+                            x = box["x"] + box["width"] / 2
+                            y = box["y"] + box["height"] / 2
+                            page.mouse.move(x, y)
+                            time.sleep(0.15)
+                            page.mouse.down()
+                            time.sleep(0.08)
+                            page.mouse.up()
+                            clicked = True
+                            click_method = "mouse coordinates"
+                            print(
+                                f"  → Click físico enviado en "
+                                f"({x:.0f}, {y:.0f})"
+                            )
+                    except Exception as mouse_error:
+                        print(
+                            "  ⚠️  Click físico falló: "
+                            f"{str(mouse_error).splitlines()[0]}"
+                        )
+
+                # 3) Click Playwright/DOM como último recurso.
+                if not clicked:
+                    try:
+                        draft_btn.click(
+                            timeout=4000,
+                            force=True,
+                            no_wait_after=True,
+                        )
                         clicked = True
                         click_method = "Playwright force click"
                     except Exception as click_error:
@@ -4618,49 +4705,14 @@ def _subir_video_intento(
                     page.screenshot(path="error_click_save_draft.png")
                     return False
 
-                print(f"  → Click de Guardar borrador enviado ({click_method})")
+                print(f"  → Activación enviada ({click_method})")
                 time.sleep(0.8)
                 after_click_state = _draft_button_state()
-                print(f"  Estado después del click: {after_click_state}")
+                print(f"  Estado después de activar: {after_click_state}")
 
-                # Tras el click físico, una respuesta HTTP de TikTok es una señal
-                # mucho más útil que esperar un cambio de atributo del botón.
                 if save_network_events:
                     for event in save_network_events[-12:]:
                         print(f"  🌐 {event}")
-
-                try:
-                    no_visible_transition = (
-                        before_state.get("url") == after_click_state.get("url")
-                        and before_state.get("data_loading")
-                        == after_click_state.get("data_loading")
-                        and before_state.get("aria_disabled")
-                        == after_click_state.get("aria_disabled")
-                        and before_state.get("data_disabled")
-                        == after_click_state.get("data_disabled")
-                    )
-                except Exception:
-                    no_visible_transition = False
-
-                if no_visible_transition:
-                    print(
-                        "  ⚠️  El primer click no produjo transición visible. "
-                        "Reintentando una sola vez con click físico..."
-                    )
-                    try:
-                        box = draft_btn.bounding_box()
-                        if box:
-                            x = box["x"] + box["width"] / 2
-                            y = box["y"] + box["height"] / 2
-                            page.mouse.click(x, y)
-                            click_method += " + mouse retry"
-                            time.sleep(1.0)
-                            print(f"  Estado tras reintento: {_draft_button_state()}")
-                    except Exception as retry_error:
-                        print(
-                            "  ⚠️  Reintento físico falló: "
-                            f"{str(retry_error).splitlines()[0]}"
-                        )
 
                 print(
                     f"→ Esperando confirmación del borrador "
@@ -4671,6 +4723,7 @@ def _subir_video_intento(
                 deadline = time.time() + TIKTOK_CONFIRM_TIMEOUT_SECONDS
                 upload_url = page.url
                 last_event_count = len(save_network_events)
+                silent_deadline = time.time() + 12
 
                 while time.time() < deadline:
                     try:
@@ -4707,7 +4760,10 @@ def _subir_video_intento(
                             for event in save_network_events[last_event_count:]:
                                 print(f"  🌐 {event}")
                             last_event_count = len(save_network_events)
+                            silent_deadline = time.time() + 12
 
+                        # Un cambio de URL o desaparición del botón puede indicar
+                        # que React terminó la operación aunque no muestre toast.
                         current_btn = page.locator(draft_selector).first
                         try:
                             if current_btn.count() == 0 and page.url != upload_url:
@@ -4725,6 +4781,7 @@ def _subir_video_intento(
                             ).lower()
 
                             if loading == "true":
+                                silent_deadline = time.time() + 12
                                 time.sleep(0.5)
                                 continue
 
@@ -4743,10 +4800,20 @@ def _subir_video_intento(
                                 )
                                 and not fallo
                             ):
+                                silent_deadline = time.time() + 12
                                 time.sleep(0.5)
                                 continue
                         except Exception:
                             pass
+
+                        # Si durante 12 s no hubo una sola señal de guardado ni
+                        # petición relevante nueva, cortamos antes del timeout largo.
+                        if time.time() >= silent_deadline and not save_network_events:
+                            print(
+                                "  ⚠️  Sin transición ni petición de guardado "
+                                "durante 12 s; abortando este intento."
+                            )
+                            break
 
                     except Exception as poll_error:
                         print(
