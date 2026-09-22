@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.4.6"
+APP_VERSION = "0.4.7"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -2726,8 +2726,8 @@ def load_clip_registry() -> dict:
     return {}
 
 
-def save_clip_registry(registry: dict):
-    """Guarda el registro de forma atómica y limita su crecimiento."""
+def save_clip_registry(registry: dict) -> bool:
+    """Guarda el registro de forma atómica, tolerando locks breves de Windows."""
     with PIPELINE_REGISTRY_LOCK:
         CLIP_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
 
@@ -2744,11 +2744,39 @@ def save_clip_registry(registry: dict):
         tmp_path = CLIP_REGISTRY_FILE.with_suffix(
             CLIP_REGISTRY_FILE.suffix + ".tmp"
         )
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(registry, f, indent=2, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, CLIP_REGISTRY_FILE)
+
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(registry, f, indent=2, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+        except Exception as exc:
+            print(f"  ⚠️  No se pudo preparar el registro temporal: {exc}")
+            return False
+
+        last_error = None
+        for attempt in range(1, 6):
+            try:
+                os.replace(tmp_path, CLIP_REGISTRY_FILE)
+                return True
+            except PermissionError as exc:
+                last_error = exc
+                if attempt < 5:
+                    time.sleep(0.4 * attempt)
+            except OSError as exc:
+                last_error = exc
+                if attempt < 5:
+                    time.sleep(0.4 * attempt)
+
+        print(
+            "  ⚠️  No se pudo reemplazar "
+            f"{CLIP_REGISTRY_FILE.name} después de 5 intentos: {last_error}"
+        )
+        print(
+            "  ⚠️  El registro seguirá actualizado en memoria; "
+            "no se redescargarán clips viejos durante esta ejecución."
+        )
+        return False
 
 
 PIPELINE_PENDING_STATUSES = {
@@ -3684,17 +3712,52 @@ def watch_kick_clips(stop_event=None, on_processed=None):
         current = fetch_kick_clips()
 
         if not registry:
+            # Primera inicialización: primero construimos TODO el registro en memoria.
+            # Antes cada _register_clip_metadata() intentaba guardar inmediatamente;
+            # si Windows bloqueaba seen_clips.json, la inicialización quedaba a medias
+            # y el watcher interpretaba los clips restantes como nuevos.
+            initialized_count = 0
             for clip in current:
                 cid = clip.get("id")
-                if cid:
-                    _register_clip_metadata(
-                        clip,
-                        registry,
-                        status="known",
+                if not cid:
+                    continue
+
+                clip_id = str(cid)
+                created_timestamp = _parse_clip_timestamp(clip.get("created_at"))
+                try:
+                    duration = (
+                        float(clip.get("duration"))
+                        if clip.get("duration") is not None
+                        else None
                     )
-            save_clip_registry(registry)
+                except (TypeError, ValueError):
+                    duration = None
+
+                registry[clip_id] = {
+                    "clip_id": clip_id,
+                    "title": clip.get("title") or "",
+                    "title_normalized": _normalize_clip_title(clip.get("title")),
+                    "created_at": clip.get("created_at"),
+                    "created_timestamp": created_timestamp,
+                    "started_at": clip.get("started_at"),
+                    "stream_identity": _clip_stream_identity(clip),
+                    "duration": duration,
+                    "category_name": _clip_category_name(clip),
+                    "channel": _clip_channel_name(clip),
+                    "platform": clip.get("platform") or "Kick",
+                    "status": "known",
+                    "last_seen_at": time.time(),
+                }
+                initialized_count += 1
+
+            saved = save_clip_registry(registry)
+            if not saved:
+                print(
+                    "  ⚠️  La persistencia del registro falló, "
+                    "pero la memoria del watcher quedó inicializada completa."
+                )
             print(
-                f"  🌱 Primera inicialización: {len(current)} clips actuales "
+                f"  🌱 Primera inicialización: {initialized_count} clips actuales "
                 "marcados como conocidos (solo procesará los que aparezcan después).\n"
             )
         else:
