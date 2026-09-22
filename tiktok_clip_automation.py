@@ -710,6 +710,7 @@ def suggest_trim_omni_video(
     clip_title: str = "",
     clip_channel: str = "",
     max_retries: int = 5,
+    just_chatting: bool = False,
 ) -> dict | None:
     """
     Auto-trim con Nemotron Omni usando un proxy de 720p a 1 FPS.
@@ -743,8 +744,19 @@ ADEMÁS, generá una descripción para TikTok basándote en lo que ocurre en el 
 - Obligatoriamente incluí un hashtag con el nombre del canal y el hashtag #kick.
 - La descripción completa (texto + hashtags) no debe superar 220 caracteres.
 """
+        prompt_context = (
+            "TIPO DE CLIP: JUST CHATTING / CHARLA. "
+            "La cámara principal ocupa prácticamente toda la escena. "
+            "Priorizá contexto conversacional, remates y reacciones habladas."
+            if just_chatting
+            else
+            "TIPO DE CLIP: GAMEPLAY. Priorizá interacción entre gameplay y reacción."
+        )
+
         prompt = f"""Sos editor de Reels virales del streamer argentino "Eskrotos" (Kick).
 Estilo: humor absurdo, reacciones exageradas, sarcasmo, fallos épicos, punchlines.
+
+{prompt_context}
 
 TÍTULO ORIGINAL DEL CLIP EN KICK:
 "{title_for_prompt}"
@@ -824,9 +836,12 @@ No agregues Markdown ni texto fuera del JSON.
 
                 data = r.json()
                 msg = data["choices"][0]["message"]
-                response_text = (msg.get("content") or "") + "\n" + (
-                    msg.get("reasoning_content") or msg.get("reasoning") or ""
+                response_text = _coerce_text(msg.get("content"))
+                reasoning_text = _coerce_text(
+                    msg.get("reasoning_content") or msg.get("reasoning")
                 )
+                if reasoning_text:
+                    response_text = response_text + "\n" + reasoning_text
 
                 match = re.search(
                     r'\{[^{}]*"start"\s*:\s*-?[\d.]+[^{}]*\}',
@@ -859,9 +874,9 @@ No agregues Markdown ni texto fuera del JSON.
                     if end - start < min_len:
                         end = min(duration, start + min_len)
 
-                reason = str(obj.get("reason") or "").strip()
+                reason = _coerce_text(obj.get("reason")).strip()
                 caption = " ".join(
-                    str(obj.get("caption") or "").replace("\n", " ").split()
+                    _coerce_text(obj.get("caption")).replace("\n", " ").split()
                 )
                 caption = _ensure_omni_identity_hashtags(
                     caption,
@@ -916,6 +931,7 @@ def suggest_trim_llm(
     video_path: Path | None = None,
     clip_title: str = "",
     clip_channel: str = "",
+    just_chatting: bool = False,
 ) -> dict | None:
     """Punto de entrada al auto-trim; usa Nemotron Omni para trim y contexto."""
     if video_path is not None and video_path.exists():
@@ -924,6 +940,7 @@ def suggest_trim_llm(
             duration,
             clip_title=clip_title,
             clip_channel=clip_channel,
+            just_chatting=just_chatting,
         )
 
     print("  ⚠️  Sin video para Omni; no se sugiere trim automático.")
