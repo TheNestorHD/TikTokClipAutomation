@@ -61,6 +61,10 @@ def load_functions():
     assert 'save_network_events = []' in source
     assert 'REQUEST FAILED' in source
     assert 'draft_btn.evaluate("(el) => el.click()")' in source
+    assert 'page.mouse.move(x, y)' in source
+    assert 'page.mouse.down()' in source
+    assert 'page.mouse.up()' in source
+    assert 'REQUEST FAILED' in source
 
     tree = ast.parse(source, filename=str(SOURCE))
     selected = [
