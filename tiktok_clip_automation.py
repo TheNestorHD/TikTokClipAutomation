@@ -1580,43 +1580,215 @@ def _transcribe_with_faster_whisper(audio_path: Path) -> tuple[list[dict], str]:
     return _clean_transcribed_words(words), model_name
 
 
-def transcribe_video(video_path: Path):
-    """Transcribe un clip usando whisper.cpp opcional o faster-whisper."""
-    audio_path = None
+def _parse_kimi_transcription_response(response_text: str) -> list[dict]:
+    """
+    Convierte la respuesta de Kimi a la misma estructura que usa Whisper:
+    [{"word": "...", "start": 0.0, "end": 0.5, "probability": None}, ...]
+    Acepta word-level y también segmentos {text,start,end} como fallback.
+    """
+    import re
 
-    try:
-        audio_path = _extract_audio_for_whisper(video_path)
-        print("     Audio pre-procesado (mono 16k + loudnorm)")
-    except Exception as e:
-        print(f"     ⚠️  No se pudo pre-procesar audio ({e})")
-        audio_path = video_path
+    text_value = _coerce_text(response_text).strip()
+    if not text_value:
+        return []
 
-    try:
-        use_cpp = (
-            WHISPER_BACKEND == "whisper.cpp"
-            or (
-                WHISPER_BACKEND == "auto"
-                and WHISPER_CPP_EXE.exists()
-                and WHISPER_CPP_MODEL.exists()
-            )
+    candidates = []
+    array_match = re.search(r"\[\s*\{.*\}\s*\]", text_value, re.DOTALL)
+    if array_match:
+        candidates.append(array_match.group(0))
+    object_match = re.search(r"\{\s*[\"''](?:words|segments)[\"'']\s*:\s*\[.*\]\s*\}", text_value, re.DOTALL)
+    if object_match:
+        candidates.append(object_match.group(0))
+
+    data = None
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+            break
+        except Exception:
+            continue
+
+    if isinstance(data, dict):
+        data = data.get("words") or data.get("segments") or []
+    if not isinstance(data, list):
+        return []
+
+    words = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+
+        raw_word = _coerce_text(item.get("word"))
+        try:
+            start = float(item.get("start"))
+            end = float(item.get("end"))
+        except (TypeError, ValueError):
+            start = end = None
+
+        if raw_word and start is not None and end is not None and end > start:
+            words.append({
+                "word": raw_word.strip(),
+                "start": start,
+                "end": end,
+                "probability": None,
+            })
+            continue
+
+        segment_text = _coerce_text(
+            item.get("text") or item.get("caption") or item.get("content")
+        ).strip()
+        try:
+            seg_start = float(item.get("start"))
+            seg_end = float(item.get("end"))
+        except (TypeError, ValueError):
+            continue
+
+        segment_words = segment_text.split()
+        if not segment_words or seg_end <= seg_start:
+            continue
+
+        span = seg_end - seg_start
+        step = span / len(segment_words)
+        for index, word in enumerate(segment_words):
+            word_start = seg_start + index * step
+            word_end = seg_start + (index + 1) * step
+            words.append({
+                "word": word,
+                "start": word_start,
+                "end": word_end,
+                "probability": None,
+            })
+
+    return _clean_transcribed_words(words)
+
+
+def transcribe_audio_with_kimi(audio_path: Path) -> list[dict]:
+    """
+    Fallback separado de Whisper. Envía el audio a Kimi y exige timestamps.
+    La API de NVIDIA documenta actualmente Kimi-K3 como texto + imagen; por eso
+    un rechazo de audio se trata como un fallback no disponible, sin tumbar el pipeline.
+    """
+    import base64
+    import requests
+
+    print("  🧠 Fallback de subtítulos: enviando audio a Kimi...")
+    audio_bytes = audio_path.read_bytes()
+    b64 = base64.b64encode(audio_bytes).decode("utf-8")
+
+    prompt = """Transcribí TODO el audio del streamer en español rioplatense.
+Devolvé SOLO JSON válido con esta estructura exacta:
+{"words":[{"word":"hola","start":0.00,"end":0.42},{"word":"mundo","start":0.42,"end":0.88}]}
+Usá segundos desde el inicio del audio.
+Cada elemento debe ser una palabra o token corto con timestamps.
+No agregues Markdown, comentarios ni texto fuera del JSON.
+"""
+
+    headers = {
+        "Authorization": f"Bearer {NVIDIA_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    payload = {
+        "model": FACE_KIMI_MODEL,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "audio_url",
+                    "audio_url": {
+                        "url": f"data:audio/wav;base64,{b64}",
+                    },
+                },
+            ],
+        }],
+        "max_tokens": 4096,
+        "temperature": 0.0,
+        "stream": False,
+    }
+
+    response = requests.post(
+        NVIDIA_API_URL,
+        headers=headers,
+        json=payload,
+        timeout=FACE_KIMI_TIMEOUT,
+    )
+
+    if response.status_code != 200:
+        detail = _coerce_text(response.text).replace("\n", " ")
+        raise RuntimeError(
+            f"Kimi no aceptó el audio (HTTP {response.status_code}): {detail[:400]}"
         )
 
-        if use_cpp:
-            try:
-                print("  🚀 Whisper backend: whisper.cpp")
-                words, model_name = _transcribe_with_whisper_cpp(audio_path)
-            except Exception as e:
-                print(f"  ⚠️  whisper.cpp falló: {e}. Fallback a faster-whisper...")
-                words, model_name = _transcribe_with_faster_whisper(audio_path)
-        else:
-            print("  🚀 Whisper backend: faster-whisper")
-            words, model_name = _transcribe_with_faster_whisper(audio_path)
+    data = response.json()
+    message = data.get("choices", [{}])[0].get("message", {})
+    response_text = _coerce_text(message.get("content"))
 
-        preview = " ".join(w["word"] for w in words[:25])
-        if preview:
-            print(f"     Preview: {preview}{'...' if len(words) > 25 else ''}")
-        print(f"  ✅ {len(words)} palabras detectadas ({model_name})")
-        return words
+    words = _parse_kimi_transcription_response(response_text)
+    if not words:
+        raise RuntimeError("Kimi respondió, pero no devolvió subtítulos parseables.")
+
+    print(f"  ✅ Kimi fallback: {len(words)} palabras detectadas")
+    return words
+
+
+def transcribe_video(video_path: Path):
+    """Transcribe con Whisper; si falla por completo, usa Kimi como fallback opcional."""
+    audio_path = None
+    transcribe_error = None
+
+    try:
+        try:
+            audio_path = _extract_audio_for_whisper(video_path)
+            print("     Audio pre-procesado (mono 16k + loudnorm)")
+        except Exception as e:
+            print(f"     ⚠️  No se pudo pre-procesar audio ({e})")
+            audio_path = video_path
+
+        try:
+            use_cpp = (
+                WHISPER_BACKEND == "whisper.cpp"
+                or (
+                    WHISPER_BACKEND == "auto"
+                    and WHISPER_CPP_EXE.exists()
+                    and WHISPER_CPP_MODEL.exists()
+                )
+            )
+
+            if use_cpp:
+                try:
+                    print("  🚀 Whisper backend: whisper.cpp")
+                    words, model_name = _transcribe_with_whisper_cpp(audio_path)
+                except Exception as e:
+                    print(f"  ⚠️  whisper.cpp falló: {e}. Fallback a faster-whisper...")
+                    words, model_name = _transcribe_with_faster_whisper(audio_path)
+            else:
+                print("  🚀 Whisper backend: faster-whisper")
+                words, model_name = _transcribe_with_faster_whisper(audio_path)
+
+            preview = " ".join(w["word"] for w in words[:25])
+            if preview:
+                print(f"     Preview: {preview}{'...' if len(words) > 25 else ''}")
+            print(f"  ✅ {len(words)} palabras detectadas ({model_name})")
+            return words
+
+        except Exception as e:
+            transcribe_error = e
+            print(f"  ❌ Whisper falló completamente: {e}")
+
+            if not KIMI_WHISPER_FALLBACK_ENABLED:
+                raise
+
+            fallback_audio = audio_path
+            if fallback_audio is None or fallback_audio == video_path:
+                fallback_audio = _extract_audio_for_whisper(video_path)
+
+            words = transcribe_audio_with_kimi(fallback_audio)
+            preview = " ".join(w["word"] for w in words[:25])
+            if preview:
+                print(f"     Preview Kimi: {preview}{'...' if len(words) > 25 else ''}")
+            return words
 
     finally:
         if audio_path is not None and audio_path != video_path:
@@ -1624,6 +1796,8 @@ def transcribe_video(video_path: Path):
                 audio_path.unlink(missing_ok=True)
             except Exception:
                 pass
+
+
 
 
 # ============================================================
