@@ -3084,6 +3084,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     registry_update(
                         clip_id,
                         status="failed",
+                        failure_stage="processing",
                         last_error="process_one_clip devolvió False",
                         last_attempt_at=time.time(),
                     )
@@ -3092,6 +3093,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                 registry_update(
                     clip_id,
                     status="failed",
+                    failure_stage="processing",
                     last_error=str(exc),
                     last_attempt_at=time.time(),
                 )
@@ -3178,6 +3180,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                 process_queue.put({
                     **clip,
                     "id": clip_id,
+                    "category_name": _clip_category_name(clip),
                     "channel": clip.get("channel") or KICK_CHANNEL,
                     "platform": clip.get("platform") or "Kick",
                     "local_path": str(path),
