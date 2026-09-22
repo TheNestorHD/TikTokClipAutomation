@@ -4864,17 +4864,39 @@ class TikTokClipAutomationApp:
             button_hover_color=self.ACCENT_HOVER,
         ).pack(anchor="w", pady=3)
 
-        self.kimi_fallback_var = tk.BooleanVar(value=True)
-        self.ctk.CTkSwitch(
-            smart_body,
-            text="Fallback de subtítulos con Kimi cuando Whisper falla",
-            variable=self.kimi_fallback_var,
-            onvalue=True,
-            offvalue=False,
-            progress_color=self.ACCENT,
+        transcription_row = self.ctk.CTkFrame(smart_body, fg_color="transparent")
+        transcription_row.pack(fill="x", pady=(3, 5))
+        self._label(
+            transcription_row,
+            "Modelo de subtítulos:",
+            size=10,
+            color=self.MUTED,
+            width=140,
+            anchor="w",
+        ).pack(side="left")
+
+        self.transcription_model_var = tk.StringVar(value="Whisper")
+        self.transcription_model_menu = self.ctk.CTkOptionMenu(
+            transcription_row,
+            values=["Whisper", "Nemotron Omni"],
+            variable=self.transcription_model_var,
+            width=190,
+            height=34,
+            fg_color=self.CARD_ALT,
             button_color=self.ACCENT,
             button_hover_color=self.ACCENT_HOVER,
-        ).pack(anchor="w", pady=3)
+            command=self._on_transcription_model_change,
+        )
+        self.transcription_model_menu.pack(side="left")
+
+        self._label(
+            transcription_row,
+            "Whisper es el predeterminado. Si falla completamente, Omni toma el relevo automáticamente.",
+            size=10,
+            color=self.MUTED,
+            wraplength=610,
+            justify="left",
+        ).pack(side="left", padx=12)
 
         retention_row = self.ctk.CTkFrame(smart_body, fg_color="transparent")
         retention_row.pack(fill="x", pady=(7, 2))
@@ -5131,6 +5153,9 @@ class TikTokClipAutomationApp:
 
     def _on_caption_mode_change(self, value):
         self.caption_mode_var.set(value)
+
+    def _on_transcription_model_change(self, value):
+        self.transcription_model_var.set(value)
 
 
     def _make_performance_row(self, parent):
@@ -5412,7 +5437,7 @@ class TikTokClipAutomationApp:
             "TIKTOK_PROCESSING_TIMEOUT_SECONDS",
             "TIKTOK_CONFIRM_TIMEOUT_SECONDS",
             "JUST_CHATTING_MODE_ENABLED",
-            "KIMI_WHISPER_FALLBACK_ENABLED",
+            "TRANSCRIPTION_MODEL",
             "JUST_CHATTING_RETENTION_DIR",
         ]
         defaults = {
@@ -5436,9 +5461,10 @@ class TikTokClipAutomationApp:
             self.just_chatting_mode_var.set(
                 env_bool("JUST_CHATTING_MODE_ENABLED", True)
             )
-        if hasattr(self, "kimi_fallback_var"):
-            self.kimi_fallback_var.set(
-                env_bool("KIMI_WHISPER_FALLBACK_ENABLED", True)
+        if hasattr(self, "transcription_model_var"):
+            transcription_model = env_value("TRANSCRIPTION_MODEL", "whisper").strip().lower()
+            self.transcription_model_var.set(
+                "Nemotron Omni" if transcription_model == "omni" else "Whisper"
             )
 
         caption_mode = env_value("TIKTOK_CAPTION_MODE", "template").strip().lower()
@@ -5506,7 +5532,11 @@ class TikTokClipAutomationApp:
                 "TIKTOK_PROCESSING_TIMEOUT_SECONDS": self.entry_vars.get("TIKTOK_PROCESSING_TIMEOUT_SECONDS", tk.StringVar(value="180")).get().strip(),
                 "TIKTOK_CONFIRM_TIMEOUT_SECONDS": self.entry_vars.get("TIKTOK_CONFIRM_TIMEOUT_SECONDS", tk.StringVar(value="90")).get().strip(),
                 "JUST_CHATTING_MODE_ENABLED": "true" if self.just_chatting_mode_var.get() else "false",
-                "KIMI_WHISPER_FALLBACK_ENABLED": "true" if self.kimi_fallback_var.get() else "false",
+                "TRANSCRIPTION_MODEL": (
+                    "omni"
+                    if self.transcription_model_var.get() == "Nemotron Omni"
+                    else "whisper"
+                ),
                 "JUST_CHATTING_RETENTION_DIR": self._config_path_value("JUST_CHATTING_RETENTION_DIR"),
             }
 
