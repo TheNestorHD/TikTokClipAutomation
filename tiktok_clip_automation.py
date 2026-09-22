@@ -3048,16 +3048,32 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     output_path = OUTPUT_DIR / f"reel_{path.stem}.mp4"
                     registry_update(
                         clip_id,
-                        status="processed",
+                        status="awaiting_tiktok",
                         output_path=str(output_path),
                         last_error=None,
+                        failure_stage=None,
                     )
-                    print(f"  ✅ Clip terminado: {output_path.name}")
+                    print(f"  ✅ Edición terminada; esperando TikTok: {output_path.name}")
 
                     if PIPELINE_ON_PROCESSED:
                         try:
-                            PIPELINE_ON_PROCESSED(output_path, job)
+                            callback_ok = PIPELINE_ON_PROCESSED(output_path, job)
+                            if callback_ok is False:
+                                registry_update(
+                                    clip_id,
+                                    status="failed",
+                                    failure_stage="tiktok",
+                                    last_error="No se pudo encolar el Reel en TikTok.",
+                                    last_attempt_at=time.time(),
+                                )
                         except Exception as callback_error:
+                            registry_update(
+                                clip_id,
+                                status="failed",
+                                failure_stage="tiktok",
+                                last_error=str(callback_error),
+                                last_attempt_at=time.time(),
+                            )
                             print(
                                 f"  ⚠️  Callback post-procesado falló: "
                                 f"{callback_error}"
