@@ -54,7 +54,10 @@ def load_functions():
     assert "CATEGORÍA DEL CLIP:" in source
     assert "TRANSCRIPCIÓN GENERADA EXCLUSIVAMENTE POR WHISPER:" in source
     assert 'button[data-e2e="save_draft_button"]:visible' in source
-    assert 'btn.wait_for(state="visible", timeout=12000)' in source
+    assert 'btn.wait_for(state="visible", timeout=12000)' not in source
+    assert 'draft_selector = \'button[data-e2e="save_draft_button"]\'' in source
+    assert 'draft_btn.dispatch_event("click", timeout=2000)' in source
+    assert 'draft_btn.evaluate("(el) => el.click()")' in source
 
     tree = ast.parse(source, filename=str(SOURCE))
     selected = [
