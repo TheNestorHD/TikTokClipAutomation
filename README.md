@@ -34,9 +34,9 @@ El dedupe combina una ventana temporal, la identidad del stream, duración y min
 
 ## Edición
 
-El motor conserva el pipeline de edición: detección de facecam con Kimi (hasta 5 intentos) y DiffusionGemma como fallback, transcripción configurable, auto-trim con Nemotron Omni usando proxy 720p/1 FPS y los últimos 120 segundos para clips largos, y render vertical 1080x1920.
+El motor conserva el pipeline de edición: detección de facecam con Kimi (hasta 5 intentos) y DiffusionGemma como fallback, transcripción **exclusivamente con Whisper**, auto-trim con Nemotron Omni usando proxy 720p/1 FPS y los últimos 120 segundos para clips largos, y render vertical 1080x1920.
 
-La transcripción se puede elegir desde Configuración entre **Whisper** (predeterminado) y **Nemotron Omni**. Con Whisper, TTCA intenta primero `whisper.cpp` o `faster-whisper` según la configuración; si todos los intentos de Whisper fallan, hace fallback directo a Nemotron Omni con el audio. Con Omni seleccionado, el audio se envía directamente al modelo para generar la transcripción. Nemotron 3 Nano Omni acepta audio WAV/MP3, soporta transcripción y timestamps a nivel de palabra.
+Whisper es ahora la única fuente de transcripción. TTCA intenta primero `whisper.cpp` cuando está disponible y cae a `faster-whisper` si falla; si ambos fallan, el clip queda en fallo de procesamiento y **Omni no se usa para transcribir**. La transcripción con timestamps por palabra se guarda en caché en `data/transcripts` para que un reintento no tenga que volver a ejecutar Whisper sobre el mismo archivo válido.
 
 
 FFmpeg se lanza en Windows con prioridad **Idle** por defecto y con un número reducido de hilos para que pueda seguir funcionando junto a OBS con menor competencia por CPU. Se puede ajustar `FFMPEG_PRIORITY` y `FFMPEG_THREADS` desde la configuración avanzada del programa.
@@ -51,7 +51,8 @@ Cuando el clip de Kick trae `category.name = "Just Chatting"` y está habilitado
 - debajo se coloca un video aleatorio de **Videos para retención**;
 - ese video se repite en loop y nunca controla la duración final: manda la duración/trim del clip principal;
 - los subtítulos se generan antes del análisis de Omni;
-- Omni recibe explícitamente que se trata de un clip de charla para priorizar contexto conversacional al elegir el tramo.
+- Omni recibe explícitamente que se trata de un clip de charla para priorizar contexto conversacional al elegir el tramo;
+- para elegir el recorte y generar el caption, Omni recibe también el **título**, la **categoría** y la **transcripción de Whisper con timestamps por palabra**.
 
 La carpeta predeterminada es `assets/attention_retention`. Podés cambiarla desde Configuración. Si la carpeta queda dentro de `assets/`, el `build_windows.bat` la incluye automáticamente dentro del compilado.
 
@@ -64,9 +65,17 @@ No se aplican horarios, franjas, límites diarios ni intervalos artificiales. Un
 - **Publicar automáticamente activado:** se publica en TikTok.
 - **Publicar automáticamente desactivado:** se sube a TikTok y se guarda como borrador, sin publicarlo.
 
-La descripción admite dos modos. **Título + hashtags** usa una plantilla configurable con `{title}` y `{hashtags}`. **IA · Omni** envía a Nemotron Omni el mismo proxy 720p/1 FPS usado para el recorte y, además, el título, el nombre del canal y la plataforma (`Kick`); con ese contexto genera la descripción y los hashtags. En modo IA, TTCA garantiza además el hashtag del canal y `#kick`. Si Omni no devuelve una descripción válida, TTCA vuelve a la plantilla manual.
+La descripción admite dos modos. **Título + hashtags** usa una plantilla configurable con `{title}` y `{hashtags}`. **IA · Omni** envía a Nemotron Omni el mismo proxy 720p/1 FPS usado para el recorte y, además, el título, la categoría, el nombre del canal, la plataforma (`Kick`) y la transcripción de Whisper con timestamps por palabra. Con ese contexto genera la descripción y los hashtags y decide el tramo a recortar. Omni no vuelve a transcribir el audio. En modo IA, TTCA garantiza además el hashtag del canal y `#kick`. Si Omni no devuelve una descripción válida, TTCA vuelve a la plantilla manual.
 
 Los fallos usan los reintentos internos configurados en `TIKTOK_UPLOAD_RETRIES`; con el valor predeterminado no hay espera adicional entre reintentos.
+
+### Recuperación tras cierres y cortes
+
+El registro del pipeline se guarda de forma atómica y se reconcilia al iniciar TTCA. Las descargas y renders se escriben primero como `.part.mp4`, se validan con FFprobe y recién entonces pasan al nombre final; un archivo parcial que quedó tras un cierre no se reutiliza como válido.
+
+Los estados `downloading`, `processing` y otros estados transitorios se revisan al arrancar. Cuando existe un resultado final válido, el pipeline continúa desde ahí; cuando falta o está corrupto, vuelve a la etapa segura anterior en lugar de entrar en un bucle de reprocesamiento.
+
+Para TikTok hay una protección adicional: si TTCA se reinicia mientras una subida estaba en `uploading`, el item pasa a `upload_interrupted`, queda bloqueado y **no se reintenta automáticamente**. Esto evita duplicar un Reel cuando TikTok pudo haber aceptado la subida justo antes del cierre. Ese item requiere revisión manual.
 
 La interfaz permite elegir el destino publicación/borrador, seleccionar el archivo de cookies y abrir las páginas necesarias para preparar la cuenta.
 
