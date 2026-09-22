@@ -3137,6 +3137,8 @@ def recover_pipeline_registry(registry: dict, log=print):
         status = record.get("status")
         downloaded = Path(record["downloaded_path"]) if record.get("downloaded_path") else None
         output = Path(record["output_path"]) if record.get("output_path") else None
+        if output is None and downloaded is not None:
+            output = OUTPUT_DIR / f"reel_{downloaded.stem}.mp4"
 
         if status == "processing":
             if output and _validate_video_file(output):
@@ -3383,6 +3385,10 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                         clip_id,
                         status="awaiting_tiktok",
                         output_path=str(output_path),
+                        generated_caption=_coerce_text(job.get("generated_caption")).strip(),
+                        caption_source=job.get("caption_source") or (
+                            "omni" if job.get("generated_caption") else "template"
+                        ),
                         last_error=None,
                         failure_stage=None,
                     )
@@ -4603,18 +4609,19 @@ class TikTokUploadManager:
             self.log(f"⚠️  TikTok: no existe {video_path}")
             return False
 
-        state = self.load_state()
-        items = state.setdefault("items", {})
-        key = str(video_path.resolve())
+        with TIKTOK_STATE_LOCK:
+            state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
+            items = state.setdefault("items", {})
+            key = str(video_path.resolve())
 
-        existing = items.get(key)
-        if existing and existing.get("status") in {
-            "uploaded",
-            "draft_saved",
-            "queued",
-            "uploading",
-            "upload_interrupted",
-        }:
+            existing = items.get(key)
+            if existing and existing.get("status") in {
+                "uploaded",
+                "draft_saved",
+                "queued",
+                "uploading",
+                "upload_interrupted",
+            }:
             # El Reel puede haber sido descubierto antes de que el watcher
             # terminara de procesar el clip original. En ese caso asociamos
             # ahora el item de TikTok con el clip del pipeline para que, al
@@ -4632,35 +4639,35 @@ class TikTokUploadManager:
                         and clip.get("generated_caption")
                         else existing.get("caption_source", "template")
                     )
-                    self.save_state(state)
+                    guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
                     self.log(
                         f"🔗 TikTok: Reel existente asociado al clip {pipeline_clip_id} → "
                         f"{video_path.name}"
                     )
             return False
 
-        clip_data = clip or {"title": video_path.stem}
-        title = clip_data.get("title") or video_path.stem
-        pipeline_clip_id = str(clip_data.get("id") or "").strip()
-        items[key] = {
-            "video_path": key,
-            "title": title,
-            "pipeline_clip_id": pipeline_clip_id or None,
-            "caption": _caption_for_clip(clip_data),
-            "caption_source": (
-                "omni"
-                if TIKTOK_CAPTION_MODE == "omni"
-                and clip_data.get("generated_caption")
-                else "template"
-            ),
-            "publish_mode": "publish" if TIKTOK_AUTO_UPLOAD else "draft",
-            "status": "queued",
-            "created_at": time.time(),
-            "scheduled_at": None,
-            "last_error": None,
-            "retry_count": 0,
-        }
-        self.save_state(state)
+            clip_data = clip or {"title": video_path.stem}
+            title = clip_data.get("title") or video_path.stem
+            pipeline_clip_id = str(clip_data.get("id") or "").strip()
+            items[key] = {
+                "video_path": key,
+                "title": title,
+                "pipeline_clip_id": pipeline_clip_id or None,
+                "caption": _caption_for_clip(clip_data),
+                "caption_source": (
+                    "omni"
+                    if TIKTOK_CAPTION_MODE == "omni"
+                    and clip_data.get("generated_caption")
+                    else "template"
+                ),
+                "publish_mode": "publish" if TIKTOK_AUTO_UPLOAD else "draft",
+                "status": "queued",
+                "created_at": time.time(),
+                "scheduled_at": None,
+                "last_error": None,
+                "retry_count": 0,
+            }
+            guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
 
         mode = "publicar" if TIKTOK_AUTO_UPLOAD else "guardar en borradores"
         self.log(f"📤 TikTok: agregado para {mode} → {video_path.name}")
@@ -4672,21 +4679,23 @@ class TikTokUploadManager:
             self.enqueue(video_path, {"title": video_path.stem})
 
     def retry_failed(self):
-        state = self.load_state()
-        changed = 0
-        for item in state.setdefault("items", {}).values():
-            if (
-                item.get("status") == "failed"
-                and Path(item.get("video_path", "")).exists()
-            ):
-                item["status"] = "queued"
-                item["scheduled_at"] = None
-                item["last_error"] = None
-                item["retry_count"] = int(item.get("retry_count", 0)) + 1
-                item["publish_mode"] = "publish" if TIKTOK_AUTO_UPLOAD else "draft"
-                changed += 1
+        with TIKTOK_STATE_LOCK:
+            state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
+            changed = 0
+            for item in state.setdefault("items", {}).values():
+                if (
+                    item.get("status") == "failed"
+                    and Path(item.get("video_path", "")).exists()
+                ):
+                    item["status"] = "queued"
+                    item["scheduled_at"] = None
+                    item["last_error"] = None
+                    item["retry_count"] = int(item.get("retry_count", 0)) + 1
+                    item["publish_mode"] = "publish" if TIKTOK_AUTO_UPLOAD else "draft"
+                    changed += 1
+            if changed:
+                guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
         if changed:
-            self.save_state(state)
             self.wake_event.set()
             self.log(f"🔁 TikTok: {changed} fallo(s) reencolado(s).")
         return changed
@@ -4720,8 +4729,9 @@ class TikTokUploadManager:
 
     def _worker(self):
         while not self.stop_event.is_set():
-            state = self.load_state()
-            items = state.setdefault("items", {})
+            with TIKTOK_STATE_LOCK:
+                state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
+                items = state.setdefault("items", {})
             pending = [
                 item
                 for item in items.values()
@@ -4747,9 +4757,9 @@ class TikTokUploadManager:
             )
             save_draft = publish_mode == "draft"
 
-            item["status"] = "uploading"
-            item["last_error"] = None
-            self.save_state(state)
+                item["status"] = "uploading"
+                item["last_error"] = None
+                guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
 
             action = "guardando borrador" if save_draft else "publicando"
             self.log(f"🚀 TikTok: {action} → {video_path.name}")
@@ -4773,7 +4783,7 @@ class TikTokUploadManager:
                 item["uploaded_timestamp"] = time.time()
                 item["last_error"] = None
                 item["scheduled_at"] = None
-                self.save_state(state)
+                    guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
                 _sync_pipeline_from_tiktok(
                     item,
                     "draft_saved" if save_draft else "uploaded",
@@ -4791,7 +4801,7 @@ class TikTokUploadManager:
                         if save_draft
                         else "La publicación no pudo confirmarse."
                     )
-                self.save_state(state)
+                    guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
                 _sync_pipeline_from_tiktok(item, "failed", item.get("last_error"))
                 action_text = "guardar el borrador" if save_draft else "la publicación"
                 self.log(
