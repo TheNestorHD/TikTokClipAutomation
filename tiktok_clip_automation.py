@@ -246,10 +246,11 @@ def check_dependencies(exit_on_error: bool = False):
     except ImportError:
         missing.append("numpy")
 
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError:
-        missing.append("faster-whisper")
+    if TRANSCRIPTION_MODEL == "whisper":
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            missing.append("faster-whisper")
 
     try:
         from PIL import Image
@@ -1604,7 +1605,8 @@ def _transcribe_with_faster_whisper(audio_path: Path) -> tuple[list[dict], str]:
 
 def _parse_transcription_response(response_text: str) -> list[dict]:
     """
-    Convierte la respuesta de Kimi a la misma estructura que usa Whisper:
+    Convierte la respuesta de un modelo de transcripción a la misma estructura
+    interna que usa Whisper:
     [{"word": "...", "start": 0.0, "end": 0.5, "probability": None}, ...]
     Acepta word-level y también segmentos {text,start,end} como fallback.
     """
@@ -1747,7 +1749,7 @@ No agregues Markdown, comentarios ni texto fuera del JSON.
     if not words:
         raise RuntimeError("Omni respondió, pero no devolvió subtítulos parseables.")
 
-    print(f"  ✅ Omni fallback: {len(words)} palabras detectadas")
+    print(f"  ✅ Omni: {len(words)} palabras detectadas")
     return words
 
 
