@@ -52,6 +52,20 @@ Los fallos usan los reintentos internos configurados en `TIKTOK_UPLOAD_RETRIES`;
 
 La interfaz permite elegir el destino publicación/borrador, seleccionar el archivo de cookies y abrir las páginas necesarias para preparar la cuenta.
 
+## Layout especial para Just Chatting
+
+TTCA lee la categoría del clip desde la API de Kick. Cuando la categoría es **Just Chatting**, el pipeline:
+
+- omite completamente la detección de facecam con Kimi/DiffusionGemma;
+- coloca el clip original a pantalla completa dentro del panel superior del Reel;
+- conserva el divisor central cuando assets/divider.png existe;
+- coloca debajo un gameplay aleatorio tomado de la carpeta assets/;
+- repite en loop el gameplay de fondo si su duración es menor que la del clip.
+
+Podés dejar los videos de fondo directamente dentro de assets/ o en subcarpetas. Se aceptan formatos comunes como .mp4, .mov, .mkv, .webm, .m4v, .avi, .ts y .m2ts.
+
+El build_windows.bat copia toda la carpeta assets/ al paquete dist/TTCA/assets, por lo que esos videos quedan incluidos en el compilado.
+
 ## Seguridad
 
 No subas `.env` ni las cookies de TikTok al repositorio. La API key de NVIDIA también queda fuera del código.
