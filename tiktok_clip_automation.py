@@ -1205,6 +1205,71 @@ def preview_layout(video_path: Path, facecam_box, orig_w, orig_h, cam_h: int = N
     cv2.destroyAllWindows()
 
 
+def preview_just_chatting_layout(
+    video_path: Path,
+    gameplay_path: Path,
+    orig_w: int,
+    orig_h: int,
+    top_h: int | None = None,
+):
+    """Muestra una preview del layout especial de Just Chatting."""
+    frame = extract_frame(video_path, 2.0)
+    gameplay_frame = extract_frame(gameplay_path, 0.0)
+
+    if top_h is None:
+        top_h = just_chatting_top_height(orig_w, orig_h)
+
+    has_divider = DIVIDER_PATH.exists()
+    effective_divider_h = DIVIDER_H if has_divider else 0
+
+    top = cv2.resize(frame, (TARGET_W, top_h), interpolation=cv2.INTER_AREA)
+
+    bottom_h = TARGET_H - top_h - effective_divider_h
+    aspect_bottom = TARGET_W / max(bottom_h, 1)
+    gh, gw = gameplay_frame.shape[:2]
+
+    if gw / max(gh, 1) > aspect_bottom:
+        new_w = max(2, int(gh * aspect_bottom))
+        x0 = max(0, (gw - new_w) // 2)
+        gameplay = gameplay_frame[:, x0:x0 + new_w]
+    else:
+        new_h = max(2, int(gw / aspect_bottom))
+        y0 = max(0, (gh - new_h) // 2)
+        gameplay = gameplay_frame[y0:y0 + new_h, :]
+
+    game_resized = cv2.resize(
+        gameplay,
+        (TARGET_W, bottom_h),
+        interpolation=cv2.INTER_AREA,
+    )
+
+    divider = None
+    if has_divider:
+        divider = cv2.imread(str(DIVIDER_PATH))
+        if divider is not None:
+            divider = cv2.resize(divider, (TARGET_W, DIVIDER_H))
+
+    if divider is not None:
+        preview = np.vstack([top, divider, game_resized])
+    else:
+        preview = np.vstack([top, game_resized])
+
+    scale = min(1.0, 900 / preview.shape[0])
+    if scale < 1.0:
+        preview = cv2.resize(preview, None, fx=scale, fy=scale)
+
+    cv2.imshow(
+        "PREVIEW Just Chatting (cualquier tecla para continuar)",
+        preview,
+    )
+    print(
+        "\n→ Preview Just Chatting generada. "
+        "Presioná cualquier tecla en la ventana para continuar..."
+    )
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+
 # ============================================================
 # SUBTÍTULOS (Whisper + ASS)
 # ============================================================
@@ -1903,9 +1968,33 @@ def process_one_clip(
         move_to_used(video_path)
         return True
 
+    category_name = _clip_category_name(clip_metadata)
+    just_chatting = category_name.casefold() == JUST_CHATTING_CATEGORY
+    gameplay_path = None
+
+    if just_chatting:
+        print(f"  💬 Categoría detectada: {category_name} → modo Just Chatting")
+        print("  📷 Se omite completamente la detección de facecam.")
+        gameplay_path = pick_just_chatting_gameplay()
+
     # ---- 1. Seleccionar facecam ----
     box = None
-    if interactive:
+    if just_chatting:
+        cam_h = just_chatting_top_height(orig_w, orig_h)
+        print(f"  📐 Altura del clip principal: {cam_h}px")
+        if interactive:
+            preview_just_chatting_layout(
+                video_path,
+                gameplay_path,
+                orig_w,
+                orig_h,
+                top_h=cam_h,
+            )
+            resp = input("\n  ¿Procesar este clip? [Enter=Sí / n=No]: ").strip().lower()
+            if resp == "n":
+                print("  ⏭️  Saltado por el usuario.")
+                return False
+    elif interactive:
         print("\n  📷 Selección de FACECAM")
         print("  1 = Manual")
         print("  2 = LLM (Kimi x5 → DiffusionGemma)  ← recomendado")
@@ -1954,29 +2043,31 @@ def process_one_clip(
             return False
 
     # Validación final (también en interactivo)
-    if not is_valid_facecam_box(*box, orig_w, orig_h):
+    if not just_chatting and not is_valid_facecam_box(*box, orig_w, orig_h):
         print(f"  ⚠️  Box de facecam inválido {box}. Puede verse deforme.")
         if not interactive:
             print("  ❌ Saltando clip por facecam inválida.")
             return False
 
     # Calcular altura final de la facecam (fija para todo el video)
-    fx, fy, fw, fh = box
-    cam_h = int(TARGET_W * fh / fw)
-    cam_h = max(280, min(cam_h, 720))
-    # Evitar estiramientos extremos si el aspect del origen es raro
-    src_aspect = fw / max(fh, 1)
-    if src_aspect < 0.7 or src_aspect > 1.9:
-        cam_h = min(cam_h, 560)
-    print(f"  📐 Altura facecam en el Reel: {cam_h}px  (origen {fw}x{fh})")
+    if not just_chatting:
+        fx, fy, fw, fh = box
+        cam_h = int(TARGET_W * fh / fw)
+    if not just_chatting:
+        cam_h = max(280, min(cam_h, 720))
+        # Evitar estiramientos extremos si el aspect del origen es raro
+        src_aspect = fw / max(fh, 1)
+        if src_aspect < 0.7 or src_aspect > 1.9:
+            cam_h = min(cam_h, 560)
+        print(f"  📐 Altura facecam en el Reel: {cam_h}px  (origen {fw}x{fh})")
 
-    # Preview del layout completo
-    if interactive:
-        preview_layout(video_path, box, orig_w, orig_h, cam_h=cam_h)
-        resp = input("\n  ¿Procesar este clip? [Enter=Sí / n=No]: ").strip().lower()
-        if resp == "n":
-            print("  ⏭️  Saltado por el usuario.")
-            return False
+        # Preview del layout completo
+        if interactive:
+            preview_layout(video_path, box, orig_w, orig_h, cam_h=cam_h)
+            resp = input("\n  ¿Procesar este clip? [Enter=Sí / n=No]: ").strip().lower()
+            if resp == "n":
+                print("  ⏭️  Saltado por el usuario.")
+                return False
 
     # ---- 2. Transcribir ----
     words = transcribe_video(video_path)
@@ -2060,7 +2151,8 @@ def process_one_clip(
     script_dir = Path(__file__).resolve().parent
     ass_path = script_dir / "_temp_subs.ass"
     effective_divider_h = DIVIDER_H if DIVIDER_PATH.exists() else 0
-    text_y = cam_h + effective_divider_h + SUB_Y_OFFSET
+    layout_top_h = cam_h if not just_chatting else just_chatting_top_height(orig_w, orig_h)
+    text_y = layout_top_h + effective_divider_h + SUB_Y_OFFSET
 
     try:
         if words:
@@ -2074,8 +2166,17 @@ def process_one_clip(
 
         print(f"\n  🎬 Renderizando con FFmpeg → {out_name}")
         cmd = build_ffmpeg_cmd(
-            video_path, output_path, box, orig_w, orig_h, ass_path, cam_h,
-            start_sec=start_sec, end_sec=end_sec
+            video_path,
+            output_path,
+            box,
+            orig_w,
+            orig_h,
+            ass_path,
+            cam_h,
+            start_sec=start_sec,
+            end_sec=end_sec,
+            just_chatting=just_chatting,
+            gameplay_path=gameplay_path,
         )
 
         # Guardamos el comando por si falla (útil para debug)
