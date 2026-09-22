@@ -3019,6 +3019,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     registry_update(
                         clip_id,
                         status="failed",
+                        failure_stage="processing",
                         last_error="archivo descargado desapareció del disco",
                         last_attempt_at=time.time(),
                     )
@@ -3031,6 +3032,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     downloaded_path=str(path),
                     last_attempt_at=time.time(),
                     last_error=None,
+                    failure_stage=None,
                 )
 
                 print(
@@ -3156,6 +3158,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                         registry_update(
                             clip_id,
                             status="failed",
+                            failure_stage="download",
                             last_error="download_kick_clip falló",
                             last_attempt_at=time.time(),
                         )
@@ -3184,6 +3187,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                 registry_update(
                     clip_id,
                     status="failed",
+                    failure_stage="download",
                     last_error=str(exc),
                     last_attempt_at=time.time(),
                 )
