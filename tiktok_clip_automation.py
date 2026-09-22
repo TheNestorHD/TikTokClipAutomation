@@ -391,7 +391,7 @@ def pick_just_chatting_gameplay() -> Path:
 
     if not candidates:
         raise FileNotFoundError(
-            "No hay videos de gameplay para Just Chatting en assets/. "
+            "No hay videos de retención para Just Chatting en la carpeta configurada. "
             "Agregá al menos un video (.mp4, .mov, .mkv, .webm, etc.)."
         )
 
