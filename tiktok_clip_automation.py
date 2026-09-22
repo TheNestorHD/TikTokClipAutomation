@@ -348,8 +348,7 @@ def _coerce_text(value) -> str:
             text_value = _coerce_text(item)
             if text_value:
                 parts.append(text_value)
-        return "
-".join(parts)
+        return "\n".join(parts)
 
     return str(value)
 
