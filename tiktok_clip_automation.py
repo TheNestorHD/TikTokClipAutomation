@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.4.2"
+APP_VERSION = "0.4.3"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -4342,88 +4342,113 @@ def _subir_video_intento(
             if save_draft:
                 print("→ Buscando botón Guardar borrador...")
 
-                draft_selectors = [
-                    # Selector estable expuesto por TikTok Studio en el DOM.
-                    'button[data-e2e="save_draft_button"]:visible',
-                    'button[data-e2e="save_draft_button"]',
-                    'div[data-e2e="save_draft_button"][role="button"]:visible',
-                    'button:has-text("Save draft"):visible',
-                    'button:has-text("Save Draft"):visible',
-                    'button:has-text("Guardar borrador"):visible',
-                    'div[role="button"]:has-text("Save draft"):visible',
-                    'div[role="button"]:has-text("Guardar borrador"):visible',
-                ]
+                # TikTok Studio expone un identificador estable para esta acción.
+                # Evitamos encadenar muchos wait_for() de 12 s: eso podía consumir
+                # más de 30 s sin mostrar ningún error útil.
+                draft_selector = 'button[data-e2e="save_draft_button"]'
+                draft_btn = page.locator(draft_selector).first
 
-                clicked = False
-                for sel in draft_selectors:
-                    try:
-                        btn = page.locator(sel).first
-
-                        # is_visible() puede devolver False mientras TikTok termina
-                        # de montar/hidratar el footer de acciones. wait_for() sí
-                        # espera explícitamente a que el nodo llegue a visible.
-                        btn.wait_for(state="visible", timeout=12000)
-
-                        disabled_values = {
-                            str(btn.get_attribute("disabled") or "").lower(),
-                            str(btn.get_attribute("aria-disabled") or "").lower(),
-                            str(btn.get_attribute("data-disabled") or "").lower(),
-                        }
-                        clases = (btn.get_attribute("class") or "").lower()
-                        loading = str(btn.get_attribute("data-loading") or "").lower()
-
-                        if (
-                            {"true", "1"} & disabled_values
-                            or "disabled" in clases
-                            or loading == "true"
-                        ):
-                            continue
-
-                        btn.scroll_into_view_if_needed(timeout=5000)
-                        time.sleep(0.4)
-
-                        try:
-                            btn.click(timeout=7000)
-                        except Exception:
-                            # TikTok puede mantener una capa visual encima aunque
-                            # el botón ya sea el correcto; el nodo sigue siendo
-                            # clickeable mediante DOM.
-                            btn.evaluate("el => el.click()")
-
-                        print(f"  → Click correcto en Guardar borrador: {sel}")
-                        clicked = True
-                        break
-                    except Exception as exc:
-                        if "save_draft_button" in sel and "visible" in sel:
-                            print(
-                                f"  ⚠️  Botón exacto todavía no visible: "
-                                f"{str(exc).splitlines()[0]}"
-                            )
-                        continue
-
-                if not clicked:
-                    # Diagnóstico final: el atributo data-e2e puede existir en el
-                    # DOM aunque otra capa haya impedido el selector :visible.
-                    try:
-                        exact = page.locator('button[data-e2e="save_draft_button"]').first
-                        exact.wait_for(state="attached", timeout=5000)
-                        exact_count = page.locator(
-                            'button[data-e2e="save_draft_button"]'
-                        ).count()
-                        print(
-                            f"  ⚠️  TikTok expone save_draft_button en DOM "
-                            f"({exact_count} coincidencia(s)), pero no pudo hacerse click."
-                        )
-                    except Exception:
-                        print(
-                            "  ⚠️  TikTok no expone save_draft_button en el DOM "
-                            "en este momento."
-                        )
-
-                    print("✗ No se encontró el botón Guardar borrador")
+                try:
+                    draft_btn.wait_for(state="attached", timeout=5000)
+                    print("  ✓ Botón save_draft_button presente en el DOM.")
+                except Exception as exc:
+                    print(
+                        "✗ TikTok no expuso save_draft_button en 5 s: "
+                        f"{str(exc).splitlines()[0]}"
+                    )
                     page.screenshot(path="error_no_save_draft_button.png")
                     return False
 
+                # Espera corta y explícita a que deje de estar deshabilitado/cargando.
+                ready_deadline = time.time() + 5000 / 1000
+                while time.time() < ready_deadline:
+                    try:
+                        visible = draft_btn.is_visible(timeout=500)
+                        disabled = str(
+                            draft_btn.get_attribute("disabled") or ""
+                        ).lower()
+                        aria_disabled = str(
+                            draft_btn.get_attribute("aria-disabled") or ""
+                        ).lower()
+                        data_disabled = str(
+                            draft_btn.get_attribute("data-disabled") or ""
+                        ).lower()
+                        loading = str(
+                            draft_btn.get_attribute("data-loading") or ""
+                        ).lower()
+
+                        if (
+                            visible
+                            and disabled not in {"true", "1"}
+                            and aria_disabled not in {"true", "1"}
+                            and data_disabled not in {"true", "1"}
+                            and loading != "true"
+                        ):
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.2)
+                else:
+                    try:
+                        print(
+                            "  ⚠️  Estado del botón: "
+                            f"visible={draft_btn.is_visible(timeout=500)} "
+                            f"aria-disabled={draft_btn.get_attribute('aria-disabled')} "
+                            f"data-disabled={draft_btn.get_attribute('data-disabled')} "
+                            f"data-loading={draft_btn.get_attribute('data-loading')}"
+                        )
+                    except Exception:
+                        pass
+
+                try:
+                    draft_btn.scroll_into_view_if_needed(timeout=2000)
+                except Exception:
+                    pass
+
+                # Primero usamos el evento real de Playwright. Si TikTok mantiene
+                # una capa visual por encima, dispatch_event() y click() vía DOM
+                # permiten accionar el mismo <button> sin esperar otra capa.
+                clicked = False
+                click_method = ""
+
+                try:
+                    draft_btn.click(timeout=4000, no_wait_after=True)
+                    clicked = True
+                    click_method = "Playwright click"
+                except Exception as click_error:
+                    print(
+                        "  ⚠️  Click normal no pudo completarse: "
+                        f"{str(click_error).splitlines()[0]}"
+                    )
+
+                if not clicked:
+                    try:
+                        draft_btn.dispatch_event("click", timeout=2000)
+                        clicked = True
+                        click_method = "dispatch_event"
+                    except Exception as dispatch_error:
+                        print(
+                            "  ⚠️  dispatch_event() falló: "
+                            f"{str(dispatch_error).splitlines()[0]}"
+                        )
+
+                if not clicked:
+                    try:
+                        draft_btn.evaluate("(el) => el.click()")
+                        clicked = True
+                        click_method = "DOM click"
+                    except Exception as dom_error:
+                        print(
+                            "  ⚠️  DOM click falló: "
+                            f"{str(dom_error).splitlines()[0]}"
+                        )
+
+                if not clicked:
+                    print("✗ No se pudo accionar Guardar borrador")
+                    page.screenshot(path="error_click_save_draft.png")
+                    return False
+
+                print(f"  → Click de Guardar borrador enviado ({click_method})")
                 print(
                     f"→ Esperando confirmación del borrador "
                     f"(hasta {TIKTOK_CONFIRM_TIMEOUT_SECONDS}s)..."
@@ -4431,54 +4456,89 @@ def _subir_video_intento(
 
                 guardado = False
                 deadline = time.time() + TIKTOK_CONFIRM_TIMEOUT_SECONDS
+                upload_url = page.url
 
                 while time.time() < deadline:
-                    content = page.content().lower()
-                    url = page.url.lower()
-
-                    exito = any([
-                        "saved to drafts" in content,
-                        "saved as draft" in content,
-                        "draft saved" in content,
-                        "saved in drafts" in content,
-                        "draft saved successfully" in content,
-                        "guardado en borradores" in content,
-                        "borrador guardado" in content,
-                        "/draft" in url,
-                        "/content" in url and "tiktokstudio" in url and "upload" not in url,
-                    ])
-
-                    fallo = any([
-                        "something went wrong" in content,
-                        "try again" in content,
-                        "failed" in content and "upload" in content,
-                    ])
-
-                    # El botón exacto de TikTok pasa a loading/disabled mientras
-                    # procesa el guardado. Si el modal/toast todavía no expuso texto,
-                    # damos un pequeño margen para que termine la navegación interna.
                     try:
-                        draft_btn = page.locator('button[data-e2e="save_draft_button"]').first
-                        if draft_btn.count() > 0:
-                            disabled = (
-                                draft_btn.get_attribute("disabled")
-                                or draft_btn.get_attribute("aria-disabled")
-                                or draft_btn.get_attribute("data-disabled")
-                            )
-                            loading = draft_btn.get_attribute("data-loading")
-                            if str(loading).lower() == "true":
-                                time.sleep(1)
+                        content = page.content().lower()
+                        url = page.url.lower()
+
+                        exito = any([
+                            "saved to drafts" in content,
+                            "saved as draft" in content,
+                            "draft saved" in content,
+                            "saved in drafts" in content,
+                            "draft saved successfully" in content,
+                            "guardado en borradores" in content,
+                            "borrador guardado" in content,
+                            "/draft" in url,
+                            (
+                                "/content" in url
+                                and "tiktokstudio" in url
+                                and "upload" not in url
+                            ),
+                        ])
+
+                        fallo = any([
+                            "something went wrong" in content,
+                            "try again" in content,
+                            "failed" in content and "upload" in content,
+                        ])
+
+                        if exito and not fallo:
+                            guardado = True
+                            break
+
+                        # Señales de que TikTok procesó la acción aunque no muestre
+                        # un toast: el botón desaparece del footer o su estado cambia
+                        # durante el guardado.
+                        current_btn = page.locator(draft_selector).first
+                        try:
+                            if current_btn.count() == 0 and page.url != upload_url:
+                                guardado = True
+                                break
+
+                            loading = str(
+                                current_btn.get_attribute("data-loading") or ""
+                            ).lower()
+                            aria_disabled = str(
+                                current_btn.get_attribute("aria-disabled") or ""
+                            ).lower()
+                            data_disabled = str(
+                                current_btn.get_attribute("data-disabled") or ""
+                            ).lower()
+
+                            if loading == "true":
+                                time.sleep(0.5)
                                 continue
-                            if str(disabled).lower() in {"true", "1"} and not fallo:
-                                time.sleep(1)
-                    except Exception:
-                        pass
 
-                    if exito and not fallo:
-                        guardado = True
-                        break
+                            if (
+                                page.url != upload_url
+                                and "/upload" not in page.url.lower()
+                                and not fallo
+                            ):
+                                guardado = True
+                                break
 
-                    time.sleep(2)
+                            if (
+                                (aria_disabled in {"true", "1"}
+                                or data_disabled in {"true", "1"})
+                                and not fallo
+                            ):
+                                time.sleep(0.5)
+                                continue
+                        except Exception:
+                            pass
+
+                    except Exception as poll_error:
+                        # No abortamos por un DOM transitorio; TikTok cambia el
+                        # árbol React mientras procesa el borrador.
+                        print(
+                            f"  ⚠️  Estado de guardado temporalmente ilegible: "
+                            f"{str(poll_error).splitlines()[0]}"
+                        )
+
+                    time.sleep(1)
 
                 if guardado:
                     print("✓ Borrador guardado correctamente")
