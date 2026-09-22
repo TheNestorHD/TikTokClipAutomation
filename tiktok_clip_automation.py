@@ -4564,6 +4564,15 @@ def _caption_for_clip(clip: dict) -> str:
 class TikTokUploadManager:
     """Sube cada Reel inmediatamente: publica o guarda borrador según la configuración."""
 
+    TERMINAL_STATUSES = {"uploaded", "draft_saved", "failed"}
+    BLOCKED_STATUSES = {
+        "uploaded",
+        "draft_saved",
+        "queued",
+        "uploading",
+        "upload_interrupted",
+    }
+
     def __init__(self, log_callback=None):
         self.log_callback = log_callback or (lambda msg: print(msg))
         self.stop_event = threading.Event()
@@ -4582,25 +4591,36 @@ class TikTokUploadManager:
             guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
 
     def recover_interrupted_uploads(self):
-        """Bloquea subidas que estaban en curso al reiniciar para impedir duplicados."""
+        """
+        Convierte cualquier 'uploading' persistido antes de un reinicio en
+        'upload_interrupted'. No se reencola automáticamente porque TikTok
+        puede haber aceptado el upload antes de que TTCA alcanzara a confirmar.
+        """
+        changed = 0
         with TIKTOK_STATE_LOCK:
             state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
-            changed = 0
             for item in state.setdefault("items", {}).values():
-                if item.get("status") == "uploading":
-                    item["status"] = "upload_interrupted"
-                    item["requires_manual_review"] = True
-                    item["interrupted_at"] = datetime.now().isoformat()
-                    item["last_error"] = (
-                        "La aplicación se reinició mientras TikTok estaba procesando esta subida. "
-                        "No se reintentará automáticamente para evitar un Reel duplicado."
-                    )
-                    item["scheduled_at"] = None
-                    changed += 1
+                if item.get("status") != "uploading":
+                    continue
+
+                item["status"] = "upload_interrupted"
+                item["requires_manual_review"] = True
+                item["interrupted_at"] = datetime.now().isoformat()
+                item["last_error"] = (
+                    "TTCA se cerró/reinició mientras TikTok estaba procesando esta subida. "
+                    "No se reintentará automáticamente para evitar un Reel duplicado."
+                )
+                item["scheduled_at"] = None
+                changed += 1
+
             if changed:
                 guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
+
         if changed:
-            self.log(f"  🛡️  TikTok: {changed} subida(s) interrumpida(s) quedaron bloqueadas para evitar duplicados.")
+            self.log(
+                f"  🛡️  TikTok: {changed} subida(s) interrumpida(s) quedaron "
+                "bloqueadas para evitar duplicados."
+            )
         return changed
 
     def enqueue(self, video_path: Path, clip: dict | None = None):
@@ -4609,42 +4629,46 @@ class TikTokUploadManager:
             self.log(f"⚠️  TikTok: no existe {video_path}")
             return False
 
+        key = str(video_path.resolve())
+
         with TIKTOK_STATE_LOCK:
             state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
             items = state.setdefault("items", {})
-            key = str(video_path.resolve())
-
             existing = items.get(key)
-            if existing and existing.get("status") in {
-                "uploaded",
-                "draft_saved",
-                "queued",
-                "uploading",
-                "upload_interrupted",
-            }:
-            # El Reel puede haber sido descubierto antes de que el watcher
-            # terminara de procesar el clip original. En ese caso asociamos
-            # ahora el item de TikTok con el clip del pipeline para que, al
-            # confirmar el borrador/publicación, el registro principal también
-            # pase a completed.
-            if clip:
-                pipeline_clip_id = str(clip.get("id") or "").strip()
-                if pipeline_clip_id and not existing.get("pipeline_clip_id"):
-                    existing["pipeline_clip_id"] = pipeline_clip_id
-                    existing["title"] = clip.get("title") or existing.get("title") or video_path.stem
-                    existing["caption"] = _caption_for_clip(clip)
-                    existing["caption_source"] = (
-                        "omni"
-                        if TIKTOK_CAPTION_MODE == "omni"
-                        and clip.get("generated_caption")
-                        else existing.get("caption_source", "template")
-                    )
-                    guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
-                    self.log(
-                        f"🔗 TikTok: Reel existente asociado al clip {pipeline_clip_id} → "
-                        f"{video_path.name}"
-                    )
-            return False
+
+            if existing and existing.get("status") in self.BLOCKED_STATUSES:
+                if clip:
+                    pipeline_clip_id = str(clip.get("id") or "").strip()
+                    changed = False
+
+                    if pipeline_clip_id and not existing.get("pipeline_clip_id"):
+                        existing["pipeline_clip_id"] = pipeline_clip_id
+                        changed = True
+
+                    title = clip.get("title") or existing.get("title") or video_path.stem
+                    if title != existing.get("title"):
+                        existing["title"] = title
+                        changed = True
+
+                    caption = _caption_for_clip(clip)
+                    if caption and caption != existing.get("caption"):
+                        existing["caption"] = caption
+                        existing["caption_source"] = (
+                            "omni"
+                            if TIKTOK_CAPTION_MODE == "omni"
+                            and clip.get("generated_caption")
+                            else existing.get("caption_source", "template")
+                        )
+                        changed = True
+
+                    if changed:
+                        guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
+                        self.log(
+                            f"🔗 TikTok: Reel existente asociado al clip "
+                            f"{pipeline_clip_id or existing.get('pipeline_clip_id') or '?'} "
+                            f"→ {video_path.name}"
+                        )
+                return False
 
             clip_data = clip or {"title": video_path.stem}
             title = clip_data.get("title") or video_path.stem
@@ -4679,9 +4703,9 @@ class TikTokUploadManager:
             self.enqueue(video_path, {"title": video_path.stem})
 
     def retry_failed(self):
+        changed = 0
         with TIKTOK_STATE_LOCK:
             state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
-            changed = 0
             for item in state.setdefault("items", {}).values():
                 if (
                     item.get("status") == "failed"
@@ -4693,8 +4717,10 @@ class TikTokUploadManager:
                     item["retry_count"] = int(item.get("retry_count", 0)) + 1
                     item["publish_mode"] = "publish" if TIKTOK_AUTO_UPLOAD else "draft"
                     changed += 1
+
             if changed:
                 guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
+
         if changed:
             self.wake_event.set()
             self.log(f"🔁 TikTok: {changed} fallo(s) reencolado(s).")
@@ -4703,6 +4729,7 @@ class TikTokUploadManager:
     def start(self):
         if self.thread and self.thread.is_alive():
             return
+
         self.recover_interrupted_uploads()
         self.stop_event.clear()
         self.wake_event.clear()
@@ -4729,80 +4756,121 @@ class TikTokUploadManager:
 
     def _worker(self):
         while not self.stop_event.is_set():
+            key = None
+            item_snapshot = None
+
             with TIKTOK_STATE_LOCK:
                 state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
                 items = state.setdefault("items", {})
-            pending = [
-                item
-                for item in items.values()
-                if item.get("status") == "queued"
-                and Path(item.get("video_path", "")).exists()
-            ]
-            pending.sort(key=lambda x: x.get("created_at", 0))
+                pending = [
+                    item
+                    for item in items.values()
+                    if item.get("status") == "queued"
+                    and Path(item.get("video_path", "")).exists()
+                ]
+                pending.sort(key=lambda x: x.get("created_at", 0))
 
-            if not pending:
+                if pending:
+                    item = pending[0]
+                    key = str(Path(item["video_path"]).resolve())
+                    current = items.get(key)
+                    if current and current.get("status") == "queued":
+                        current["status"] = "uploading"
+                        current["upload_started_at"] = datetime.now().isoformat()
+                        current["last_error"] = None
+                        guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
+                        item_snapshot = dict(current)
+
+            if item_snapshot is None:
                 self.wake_event.wait(TIKTOK_UPLOAD_CHECK_SECONDS)
                 self.wake_event.clear()
                 continue
 
-            item = pending[0]
-            video_path = Path(item["video_path"])
-
-            # El estado se persiste ANTES de tocar TikTok. Si el proceso muere
-            # después de esto, el próximo arranque lo convertirá en
-            # upload_interrupted y NO lo volverá a subir automáticamente.
-            publish_mode = item.get(
+            video_path = Path(item_snapshot["video_path"])
+            publish_mode = item_snapshot.get(
                 "publish_mode",
                 "publish" if TIKTOK_AUTO_UPLOAD else "draft",
             )
             save_draft = publish_mode == "draft"
 
-                item["status"] = "uploading"
-                item["last_error"] = None
-                guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
-
             action = "guardando borrador" if save_draft else "publicando"
-            self.log(f"🚀 TikTok: {action} → {video_path.name}")
+            self.log(
+                f"🚀 TikTok: {action} → {video_path.name} "
+                f"(estado persistido como UPLOADING antes del upload)"
+            )
 
             try:
                 success = subir_video(
                     video_path,
-                    item.get("caption", ""),
+                    item_snapshot.get("caption", ""),
                     save_draft=save_draft,
                 )
+                upload_error = None
             except Exception as exc:
                 success = False
-                item["last_error"] = str(exc)
+                upload_error = str(exc)
                 self.log(f"❌ TikTok: excepción durante la subida: {exc}")
 
-            if success:
-                now = datetime.now()
-                item["status"] = "draft_saved" if save_draft else "uploaded"
-                item["uploaded_date"] = now.strftime("%Y-%m-%d")
-                item["uploaded_at"] = now.isoformat()
-                item["uploaded_timestamp"] = time.time()
-                item["last_error"] = None
-                item["scheduled_at"] = None
-                    guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
-                _sync_pipeline_from_tiktok(
-                    item,
-                    "draft_saved" if save_draft else "uploaded",
-                    None,
+            terminal_item = None
+            terminal_status = "failed"
+
+            with TIKTOK_STATE_LOCK:
+                latest_state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
+                latest_items = latest_state.setdefault("items", {})
+                current = latest_items.get(key)
+
+                # Si otra operación ya resolvió este item, no pisamos el estado terminal.
+                if current is None:
+                    current = dict(item_snapshot)
+                    latest_items[key] = current
+
+                if current.get("status") != "upload_interrupted":
+                    if success:
+                        now = datetime.now()
+                        terminal_status = "draft_saved" if save_draft else "uploaded"
+                        current["status"] = terminal_status
+                        current["uploaded_date"] = now.strftime("%Y-%m-%d")
+                        current["uploaded_at"] = now.isoformat()
+                        current["uploaded_timestamp"] = time.time()
+                        current["last_error"] = None
+                        current["scheduled_at"] = None
+                        current["upload_finished_at"] = now.isoformat()
+                        current["requires_manual_review"] = False
+                    else:
+                        current["status"] = "failed"
+                        current["scheduled_at"] = None
+                        current["retry_count"] = int(current.get("retry_count", 0)) + 1
+                        current["last_error"] = upload_error or (
+                            "El borrador no pudo confirmarse."
+                            if save_draft
+                            else "La publicación no pudo confirmarse."
+                        )
+                        terminal_status = "failed"
+
+                    guardar_json(TIKTOK_UPLOAD_REGISTRY, latest_state)
+                    terminal_item = dict(current)
+
+            if terminal_item is None:
+                self.log(
+                    f"🛡️  TikTok: no se sobrescribió un estado interrumpido "
+                    f"para {video_path.name}."
                 )
-                result_text = "guardado en borradores" if save_draft else "publicado"
+                continue
+
+            _sync_pipeline_from_tiktok(
+                terminal_item,
+                terminal_status,
+                terminal_item.get("last_error"),
+            )
+
+            if terminal_status in {"uploaded", "draft_saved"}:
+                result_text = (
+                    "guardado en borradores"
+                    if save_draft
+                    else "publicado"
+                )
                 self.log(f"✅ TikTok: {result_text} → {video_path.name}")
             else:
-                item["status"] = "failed"
-                item["scheduled_at"] = None
-                item["retry_count"] = int(item.get("retry_count", 0)) + 1
-                if not item.get("last_error"):
-                    item["last_error"] = (
-                        "El borrador no pudo confirmarse."
-                        if save_draft
-                        else "La publicación no pudo confirmarse."
-                    )
-                    guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
-                _sync_pipeline_from_tiktok(item, "failed", item.get("last_error"))
                 action_text = "guardar el borrador" if save_draft else "la publicación"
                 self.log(
                     f"❌ TikTok: falló {video_path.name} al {action_text}. "
