@@ -34,9 +34,26 @@ El dedupe combina una ventana temporal, la identidad del stream, duración y min
 
 ## Edición
 
-El motor conserva el pipeline anterior: detección de facecam con Kimi (hasta 5 intentos) y DiffusionGemma como fallback, Whisper, auto-trim con Nemotron Omni usando proxy 720p/1 FPS y los últimos 120 segundos para clips largos, y render vertical 1080x1920.
+El motor conserva el pipeline de edición: detección de facecam con Kimi (hasta 5 intentos) y DiffusionGemma como fallback, Whisper/whisper.cpp, auto-trim con Nemotron Omni usando proxy 720p/1 FPS y los últimos 120 segundos para clips largos, y render vertical 1080x1920.
+
+Si Whisper falla por completo y está habilitado **Fallback de subtítulos con Kimi**, TTCA extrae el audio y hace una llamada separada al modelo de Kimi intentando obtener palabras con timestamps. Como la documentación actual de NVIDIA para Kimi-K3 declara entradas de texto e imagen, no audio, TTCA captura ese rechazo y prueba automáticamente un segundo fallback de audio con Nemotron Omni en lugar de abortar el clip. citeturn197837search0turn197837search7turn197837search10
 
 FFmpeg se lanza en Windows con prioridad **Idle** por defecto y con un número reducido de hilos para que pueda seguir funcionando junto a OBS con menor competencia por CPU. Se puede ajustar `FFMPEG_PRIORITY` y `FFMPEG_THREADS` desde la configuración avanzada del programa.
+
+### Just Chatting
+
+Cuando el clip de Kick trae `category.name = "Just Chatting"` y está habilitado el modo especial:
+
+- no se ejecuta la detección de FaceCam;
+- el clip completo va arriba del Reel, conservando su proporción tanto como sea posible;
+- se inserta el divisor configurado, si existe;
+- debajo se coloca un video aleatorio de **Videos para retención**;
+- ese video se repite en loop y nunca controla la duración final: manda la duración/trim del clip principal;
+- los subtítulos se generan antes del análisis de Omni;
+- Omni recibe explícitamente que se trata de un clip de charla para priorizar contexto conversacional al elegir el tramo.
+
+La carpeta predeterminada es `assets/attention_retention`. Podés cambiarla desde Configuración. Si la carpeta queda dentro de `assets/`, el `build_windows.bat` la incluye automáticamente dentro del compilado.
+
 
 ## TikTok
 
@@ -52,19 +69,6 @@ Los fallos usan los reintentos internos configurados en `TIKTOK_UPLOAD_RETRIES`;
 
 La interfaz permite elegir el destino publicación/borrador, seleccionar el archivo de cookies y abrir las páginas necesarias para preparar la cuenta.
 
-## Layout especial para Just Chatting
-
-TTCA lee la categoría del clip desde la API de Kick. Cuando la categoría es **Just Chatting**, el pipeline:
-
-- omite completamente la detección de facecam con Kimi/DiffusionGemma;
-- coloca el clip original a pantalla completa dentro del panel superior del Reel;
-- conserva el divisor central cuando assets/divider.png existe;
-- coloca debajo un gameplay aleatorio tomado de la carpeta assets/;
-- repite en loop el gameplay de fondo si su duración es menor que la del clip.
-
-Podés dejar los videos de fondo directamente dentro de assets/ o en subcarpetas. Se aceptan formatos comunes como .mp4, .mov, .mkv, .webm, .m4v, .avi, .ts y .m2ts.
-
-El build_windows.bat copia toda la carpeta assets/ al paquete dist/TTCA/assets, por lo que esos videos quedan incluidos en el compilado.
 
 ## Seguridad
 
