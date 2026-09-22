@@ -731,7 +731,10 @@ def _ensure_omni_identity_hashtags(caption: str, channel: str, max_length: int =
     import re
 
     caption = " ".join((caption or "").replace("\n", " ").split()).strip()
-    channel_name = str(channel or "").strip()
+    if isinstance(channel, dict):
+        channel_name = _clip_channel_name({"channel": channel})
+    else:
+        channel_name = str(channel or "").strip()
     channel_tag = _channel_hashtag(channel_name)
 
     clean_tokens = []
