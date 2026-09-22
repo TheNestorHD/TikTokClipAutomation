@@ -2205,7 +2205,9 @@ def process_one_clip(
         return True
 
     category_name = _clip_category_name(clip_metadata)
-    just_chatting = category_name.casefold() == JUST_CHATTING_CATEGORY
+    just_chatting = JUST_CHATTING_MODE_ENABLED and (
+        category_name.casefold() == JUST_CHATTING_CATEGORY
+    )
     gameplay_path = None
 
     if just_chatting:
@@ -2330,6 +2332,7 @@ def process_one_clip(
         video_path=video_path,
         clip_title=clip_title,
         clip_channel=clip_channel,
+        just_chatting=just_chatting,
     )
     if suggested:
         start_sec = float(suggested["start"])
@@ -5182,6 +5185,7 @@ class TikTokClipAutomationApp:
         grid.pack(fill="x", padx=14)
 
         self.pipeline_cards = {}
+        self.pipeline_values = {}
         entries = [
             ("download", "Descargas pendientes", self.download_queue_var, "↓"),
             ("process", "Procesamiento pendientes", self.process_queue_var, "⚡"),
@@ -5195,10 +5199,10 @@ class TikTokClipAutomationApp:
             self._label(card, f"{icon} {title}", size=10, color=self.MUTED, bold=True).pack(
                 anchor="w", padx=13, pady=(11, 0)
             )
-            self._label(card, var.get(), size=23, bold=True).pack(
-                anchor="w", padx=13, pady=(2, 11)
-            )
+            value_label = self._label(card, var.get(), size=23, bold=True)
+            value_label.pack(anchor="w", padx=13, pady=(2, 11))
             self.pipeline_cards[key] = card
+            self.pipeline_values[key] = value_label
 
         status = self._frame(queue_card, fg_color=self.CARD_ALT)
         status.pack(fill="x", padx=18, pady=18)
@@ -5807,23 +5811,22 @@ class TikTokClipAutomationApp:
 
     def _refresh_views(self):
         try:
-            dq = PIPELINE_DOWNLOAD_QUEUE.qsize() if PIPELINE_DOWNLOAD_QUEUE else 0
-            pq = PIPELINE_JOB_QUEUE.qsize() if PIPELINE_JOB_QUEUE else 0
+            stats = _pipeline_stats()
+            dq = stats["download_pending"]
+            pq = stats["process_pending"]
 
             self.download_queue_var.set(str(dq))
             self.process_queue_var.set(str(pq))
+            self.tiktok_queue_var.set(str(stats["tiktok_pending"]))
+            self.failed_var.set(str(stats["failed"]))
+
+            if hasattr(self, "pipeline_values"):
+                self.pipeline_values["download"].configure(text=str(dq))
+                self.pipeline_values["process"].configure(text=str(pq))
+                self.pipeline_values["tiktok"].configure(text=str(stats["tiktok_pending"]))
+                self.pipeline_values["failed"].configure(text=str(stats["failed"]))
 
             state = PIPELINE_REGISTRY or {}
-            failed = sum(1 for item in state.values() if item.get("status") == "failed")
-            self.failed_var.set(str(failed))
-
-            tiktok_state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
-            t_items = tiktok_state.get("items", {})
-            t_pending = sum(
-                1 for item in t_items.values()
-                if item.get("status") in {"queued", "uploading"}
-            )
-            self.tiktok_queue_var.set(str(t_pending))
 
             if self.running:
                 self.system_rows["watcher"].configure(text="● Activo", text_color=self.GREEN)
