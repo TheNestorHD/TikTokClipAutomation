@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.3.3"
+APP_VERSION = "0.4.0"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -76,9 +76,18 @@ DEFAULT_RELATIVE_PATHS = {
     "WHISPER_CPP_MODEL": "tools/whisper.cpp/models/ggml-large-v3.bin",
     "TIKTOK_COOKIES_FILE": "data/tiktok_cookies.txt",
     "TIKTOK_UPLOAD_REGISTRY": "data/tiktok_uploads.json",
+    "JUST_CHATTING_RETENTION_DIR": "assets/attention_retention",
 }
 
 JUST_CHATTING_CATEGORY = "just chatting"
+JUST_CHATTING_MODE_ENABLED = env_bool("JUST_CHATTING_MODE_ENABLED", True)
+KIMI_WHISPER_FALLBACK_ENABLED = env_bool("KIMI_WHISPER_FALLBACK_ENABLED", True)
+JUST_CHATTING_RETENTION_DIR = resolve_path(
+    env_value(
+        "JUST_CHATTING_RETENTION_DIR",
+        DEFAULT_RELATIVE_PATHS["JUST_CHATTING_RETENTION_DIR"],
+    )
+)
 JUST_CHATTING_VIDEO_EXTENSIONS = {
     ".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi", ".ts", ".m2ts"
 }
@@ -299,6 +308,7 @@ def ensure_dirs(strict: bool = False):
     TIKTOK_COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
     DIVIDER_PATH.parent.mkdir(parents=True, exist_ok=True)
     FONT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    JUST_CHATTING_RETENTION_DIR.mkdir(parents=True, exist_ok=True)
     WHISPER_CPP_EXE.parent.mkdir(parents=True, exist_ok=True)
     WHISPER_CPP_MODEL.parent.mkdir(parents=True, exist_ok=True)
 
@@ -311,6 +321,37 @@ def ensure_dirs(strict: bool = False):
         if strict:
             return False
     return True
+
+
+def _coerce_text(value) -> str:
+    """Convierte respuestas estructuradas de modelos en texto sin asumir .strip()."""
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, dict):
+        for key in ("text", "content", "value", "caption", "reason", "output"):
+            if key in value:
+                text_value = _coerce_text(value.get(key))
+                if text_value:
+                    return text_value
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+
+    if isinstance(value, (list, tuple)):
+        parts = []
+        for item in value:
+            text_value = _coerce_text(item)
+            if text_value:
+                parts.append(text_value)
+        return "
+".join(parts)
+
+    return str(value)
 
 
 def _clip_category_name(clip: dict | None) -> str:
@@ -339,11 +380,11 @@ def is_just_chatting_clip(clip: dict | None) -> bool:
 
 
 def pick_just_chatting_gameplay() -> Path:
-    """Elige aleatoriamente un video de gameplay dentro de assets/."""
-    assets_dir = APP_DIR / "assets"
+    """Elige aleatoriamente un video de retención dentro de la carpeta configurada."""
+    retention_dir = JUST_CHATTING_RETENTION_DIR
     candidates = sorted(
         path
-        for path in assets_dir.rglob("*")
+        for path in retention_dir.rglob("*")
         if path.is_file()
         and path.suffix.lower() in JUST_CHATTING_VIDEO_EXTENSIONS
         and not path.name.startswith(".")
@@ -356,7 +397,11 @@ def pick_just_chatting_gameplay() -> Path:
         )
 
     selected = random.choice(candidates)
-    print(f"  🎮 Gameplay de fondo elegido al azar: {selected.relative_to(assets_dir)}")
+    try:
+        display_name = selected.relative_to(retention_dir)
+    except ValueError:
+        display_name = selected.name
+    print(f"  🎮 Video de retención elegido al azar: {display_name}")
     return selected
 
 
