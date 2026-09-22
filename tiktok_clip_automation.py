@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.4.8"
+APP_VERSION = "0.4.9"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -4306,6 +4306,84 @@ def _subir_video_intento(
             cargar_cookies(context, TIKTOK_COOKIES_FILE)
             page = context.new_page()
 
+            # Seguimiento de operaciones de subida internas de TikTok. La interfaz
+            # puede mostrar "video procesado" mientras todavía termina de subir la
+            # portada/asset; en ese estado Save draft puede no disparar su acción.
+            tiktok_upload_activity = {
+                "active": set(),
+                "last_event": time.monotonic(),
+            }
+
+            def _is_tiktok_upload_request(url: str) -> bool:
+                lowered = (url or "").lower()
+                return any(
+                    token in lowered
+                    for token in (
+                        "/api/v1/video/upload/",
+                        "top/v1?action=applyuploadinner",
+                        "top/v1?action=commituploadinner",
+                        "tiktokcdn.com/upload/",
+                    )
+                )
+
+            def _track_tiktok_upload_request(request):
+                try:
+                    if _is_tiktok_upload_request(request.url):
+                        tiktok_upload_activity["active"].add(id(request))
+                        tiktok_upload_activity["last_event"] = time.monotonic()
+                except Exception:
+                    pass
+
+            def _track_tiktok_upload_done(response):
+                try:
+                    if _is_tiktok_upload_request(response.url):
+                        tiktok_upload_activity["active"].discard(
+                            id(response.request)
+                        )
+                        tiktok_upload_activity["last_event"] = time.monotonic()
+                except Exception:
+                    pass
+
+            def _track_tiktok_upload_failed(request):
+                try:
+                    if _is_tiktok_upload_request(request.url):
+                        tiktok_upload_activity["active"].discard(id(request))
+                        tiktok_upload_activity["last_event"] = time.monotonic()
+                except Exception:
+                    pass
+
+            try:
+                page.on("request", _track_tiktok_upload_request)
+                page.on("response", _track_tiktok_upload_done)
+                page.on("requestfailed", _track_tiktok_upload_failed)
+            except Exception:
+                pass
+
+            def _wait_for_tiktok_upload_quiet(
+                quiet_seconds: float = 2.5,
+                timeout_seconds: float = 15.0,
+            ) -> bool:
+                deadline = time.monotonic() + timeout_seconds
+                while time.monotonic() < deadline:
+                    active = len(tiktok_upload_activity["active"])
+                    quiet_for = time.monotonic() - tiktok_upload_activity["last_event"]
+                    if active == 0 and quiet_for >= quiet_seconds:
+                        print(
+                            f"  ✓ Subidas internas de TikTok estabilizadas "
+                            f"({quiet_for:.1f}s sin actividad)."
+                        )
+                        return True
+
+                    if int(time.monotonic()) % 2 == 0:
+                        pass
+                    time.sleep(0.2)
+
+                print(
+                    "  ⚠️  TikTok mantuvo actividad de subida durante el tiempo "
+                    f"de espera ({timeout_seconds:.0f}s)."
+                )
+                return False
+
             print("→ Navegando a TikTok Studio Upload...")
             page.goto(
                 "https://www.tiktok.com/tiktokstudio/upload?lang=en",
@@ -4456,6 +4534,9 @@ def _subir_video_intento(
             cerrar_popups(page)
 
             if save_draft:
+                print("→ Esperando que TikTok termine todas las subidas internas...")
+                _wait_for_tiktok_upload_quiet()
+
                 print("→ Buscando botón Guardar borrador...")
 
                 # TikTok Studio expone un identificador estable para esta acción.
@@ -4717,6 +4798,10 @@ def _subir_video_intento(
                 print(
                     f"→ Esperando confirmación del borrador "
                     f"(hasta {TIKTOK_CONFIRM_TIMEOUT_SECONDS}s)..."
+                )
+                print(
+                    f"  Estado de subidas al enviar Save draft: "
+                    f"activas={len(tiktok_upload_activity['active'])}"
                 )
 
                 guardado = False
