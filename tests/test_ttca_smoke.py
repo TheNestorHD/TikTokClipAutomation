@@ -18,6 +18,8 @@ FUNCTIONS = {
     "pick_just_chatting_gameplay",
     "just_chatting_top_height",
     "_format_transcription_for_omni",
+    "_clip_channel_name",
+    "_ensure_omni_identity_hashtags",
     "prepare_fonts_dir",
     "create_ass_file",
     "build_ffmpeg_cmd",
@@ -74,6 +76,25 @@ def main():
     namespace = load_functions()
 
     assert namespace["_coerce_text"]({"caption": "hola"}) == "hola"
+    assert namespace["_clip_channel_name"]({
+        "channel": {
+            "id": 45443815,
+            "username": "clockerr",
+            "slug": "clockerr",
+            "profile_picture": "https://example.invalid/user.webp",
+        }
+    }) == "clockerr"
+
+    safe_caption = namespace["_ensure_omni_identity_hashtags"](
+        "Una reacción graciosa #humor #rioplatense",
+        "clockerr",
+    )
+    assert safe_caption.endswith("#clockerr #kick")
+    assert len(safe_caption) <= 220
+    assert all(
+        not (token.startswith("#") and len(token) > 40)
+        for token in safe_caption.split()
+    )
     parsed = namespace["_parse_transcription_response"](
         json.dumps(
             {
