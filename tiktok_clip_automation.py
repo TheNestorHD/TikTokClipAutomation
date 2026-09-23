@@ -5182,6 +5182,8 @@ def fetch_tiktok_draft_count(log=print) -> int | None:
             log("→ Consultando cantidad de borradores de TikTok...")
             page.goto(url, timeout=60000, wait_until="domcontentloaded")
 
+            import re
+
             # TikTok puede renderizar primero "Drafts 0" y reemplazarlo luego
             # con el contador real cuando termina la hidratación de Studio.
             # Esperamos unos segundos y muestreamos los elementos visibles.
