@@ -2788,6 +2788,7 @@ PIPELINE_PENDING_STATUSES = {
     "queued",
     "downloading",
     "downloaded",
+    "process_queued",
     "processing",
     "awaiting_tiktok",
 }
@@ -2795,6 +2796,7 @@ PIPELINE_PROCESS_PENDING_STATUSES = {
     "queued",
     "downloading",
     "downloaded",
+    "process_queued",
     "processing",
     "awaiting_tiktok",
 }
@@ -2852,10 +2854,10 @@ def _pipeline_stats() -> dict:
     tiktok_state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
     tiktok_items = tiktok_state.get("items", {}) or {}
     tiktok_pending = {
-        str(item.get("pipeline_clip_id"))
+        str(item.get("video_path"))
         for item in tiktok_items.values()
-        if item.get("status") in {"queued", "uploading"}
-        and item.get("pipeline_clip_id")
+        if item.get("status") == "queued"
+        and item.get("video_path")
     }
     tiktok_failed_orphans = sum(
         1
@@ -2864,20 +2866,9 @@ def _pipeline_stats() -> dict:
         and not item.get("pipeline_clip_id")
     )
 
-    # Un clip en awaiting_tiktok/queued/uploading sigue pendiente hasta que
-    # TikTok confirme éxito o fallo. Los fallos terminales no cuentan como pendientes.
-    awaiting_tiktok_ids = {
-        str(clip_id)
-        for clip_id, record in registry.items()
-        if record.get("status") == "awaiting_tiktok"
-    }
-    tiktok_pending_total = len(tiktok_pending | awaiting_tiktok_ids)
-    tiktok_pending_total += sum(
-        1
-        for item in tiktok_items.values()
-        if item.get("status") in {"queued", "uploading"}
-        and not item.get("pipeline_clip_id")
-    )
+    # "Tiktoks en cola" = Reels QUEUED esperando despacho.
+    # El Reel que está UPLOADING ya fue retirado de esta cola.
+    tiktok_pending_total = len(tiktok_pending)
 
     # Los fallos de TikTok con pipeline_clip_id ya se reflejan en el registro principal.
     failed_total = (
@@ -3459,33 +3450,92 @@ def watch_kick_clips(stop_event=None, on_processed=None):
 
             try:
                 with PIPELINE_REGISTRY_LOCK:
-                    current_status = registry.get(clip_id, {}).get("status")
+                    record = dict(registry.get(clip_id, {}))
+                    current_status = record.get("status")
+
                 if current_status in {"completed", "duplicate", "awaiting_tiktok"}:
                     print(f"  ⏭️  Trabajo obsoleto ignorado: {clip_id} ({current_status})")
                     continue
 
-                if not path.exists():
+                if current_status not in {"process_queued", "downloaded"}:
+                    print(
+                        f"  ⏭️  Trabajo de procesamiento ignorado: "
+                        f"{clip_id} (estado={current_status})"
+                    )
+                    continue
+
+                if not _validate_video_file(path):
                     registry_update(
                         clip_id,
                         status="failed",
                         failure_stage="processing",
-                        last_error="archivo descargado desapareció del disco",
+                        last_error="archivo de entrada inválido o ilegible",
                         last_attempt_at=time.time(),
                     )
-                    print(f"  ❌ No existe el archivo para procesar: {path}")
+                    print(f"  ❌ Archivo inválido para procesar: {path}")
+                    continue
+
+                output_candidate = Path(
+                    record.get("output_path")
+                    or (OUTPUT_DIR / f"reel_{path.stem}.mp4")
+                )
+
+                # Idempotencia fuerte: un Reel final válido es suficiente para
+                # saltar IA/render aunque el registro haya quedado atrasado por un crash.
+                if _validate_video_file(output_candidate):
+                    registry_update(
+                        clip_id,
+                        status="awaiting_tiktok",
+                        output_path=str(output_candidate),
+                        last_error=None,
+                        failure_stage=None,
+                        recovery_note="Reel final válido recuperado antes de reprocesar",
+                        recovered_at=datetime.now().isoformat(),
+                    )
+                    print(
+                        f"  ♻️  Reel final ya válido; se evita reprocesar: "
+                        f"{output_candidate.name}"
+                    )
+
+                    if PIPELINE_ON_PROCESSED:
+                        try:
+                            if PIPELINE_ON_PROCESSED(
+                                output_candidate,
+                                {
+                                    **job,
+                                    "generated_caption": record.get("generated_caption", ""),
+                                },
+                            ) is False:
+                                registry_update(
+                                    clip_id,
+                                    status="failed",
+                                    failure_stage="tiktok",
+                                    last_error="No se pudo encolar el Reel en TikTok.",
+                                    last_attempt_at=time.time(),
+                                )
+                        except Exception as callback_error:
+                            registry_update(
+                                clip_id,
+                                status="failed",
+                                failure_stage="tiktok",
+                                last_error=str(callback_error),
+                                last_attempt_at=time.time(),
+                            )
                     continue
 
                 registry_update(
                     clip_id,
                     status="processing",
                     downloaded_path=str(path),
+                    process_started_at=datetime.now().isoformat(),
                     last_attempt_at=time.time(),
                     last_error=None,
                     failure_stage=None,
                 )
 
                 print(
-                    f"\n🎬 Procesando en secuencia: "
+                    f"
+🎬 Procesando en secuencia: "
                     f"{job.get('title') or path.name}"
                 )
 
@@ -3497,6 +3547,12 @@ def watch_kick_clips(stop_event=None, on_processed=None):
 
                 if ok:
                     output_path = OUTPUT_DIR / f"reel_{path.stem}.mp4"
+                    if not _validate_video_file(output_path):
+                        raise RuntimeError(
+                            "process_one_clip indicó éxito pero el Reel final "
+                            "no pasó la validación de integridad"
+                        )
+
                     registry_update(
                         clip_id,
                         status="awaiting_tiktok",
@@ -3507,6 +3563,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                         ),
                         last_error=None,
                         failure_stage=None,
+                        processed_at=datetime.now().isoformat(),
                     )
                     print(f"  ✅ Edición terminada; esperando TikTok: {output_path.name}")
 
@@ -3528,10 +3585,6 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                                 failure_stage="tiktok",
                                 last_error=str(callback_error),
                                 last_attempt_at=time.time(),
-                            )
-                            print(
-                                f"  ⚠️  Callback post-procesado falló: "
-                                f"{callback_error}"
                             )
                 else:
                     registry_update(
@@ -3630,6 +3683,13 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                         f"{path.name}"
                     )
 
+                registry_update(
+                    clip_id,
+                    status="process_queued",
+                    downloaded_path=str(path),
+                    process_queued_at=datetime.now().isoformat(),
+                    last_error=None,
+                )
                 process_queue.put({
                     **clip,
                     "id": clip_id,
@@ -3679,7 +3739,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
 
         if downloaded_path_str:
             local_path = Path(downloaded_path_str)
-            if local_path.exists() and status in {"queued", "downloaded", "processing", "downloading"}:
+            if local_path.exists() and status in {"queued", "downloaded", "process_queued", "processing", "downloading"}:
                 if status in {"processing", "downloading"}:
                     registry_update(
                         clip_id,
@@ -3688,6 +3748,12 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                         last_attempt_at=0,
                     )
 
+                registry_update(
+                    clip_id,
+                    status="process_queued",
+                    last_error="reanudado desde la cola persistente",
+                    last_attempt_at=0,
+                )
                 process_queue.put({
                     "id": clip_id,
                     "title": record.get("title") or local_path.stem,
@@ -3801,6 +3867,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     "queued",
                     "downloading",
                     "downloaded",
+                    "process_queued",
                     "processing",
                     "processed",
                     "awaiting_tiktok",
@@ -3814,7 +3881,8 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     if candidate_path.exists():
                         registry_update(
                             clip_id,
-                            status="downloaded",
+                            status="process_queued",
+                            process_queued_at=datetime.now().isoformat(),
                             last_error=None,
                         )
                         process_queue.put({
@@ -3918,6 +3986,11 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     for r in registry.values()
                     if r.get("status") == "downloaded"
                 )
+                process_queued = sum(
+                    1
+                    for r in registry.values()
+                    if r.get("status") == "process_queued"
+                )
                 processing = sum(
                     1
                     for r in registry.values()
@@ -3935,7 +4008,8 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                     f"{len(clips)} clips en API, "
                     f"{known} conocidos, "
                     f"{queued} esperando descarga, "
-                    f"{downloaded} descargados/esperando IA, "
+                    f"{downloaded} descargados, "
+                    f"{process_queued} esperando IA, "
                     f"{processing} procesando, "
                     f"DQ={download_queue.qsize()}, "
                     f"PQ={process_queue.qsize()}.",
@@ -7141,8 +7215,8 @@ class TikTokClipAutomationApp:
             )
         elif manager and manager.draft_capacity_blocked:
             message = (
-                "🛑 La cola de borradores está pausada hasta reiniciar TTCA. "
-                "Revisá/publicá los borradores de TikTok."
+                "🛑 TikTok está en 30/30. "
+                "Los Reels permanecen encolados y se retomarán automáticamente al liberar espacio."
             )
         elif count >= 27:
             message = (
@@ -7175,24 +7249,10 @@ class TikTokClipAutomationApp:
 
         def worker():
             try:
-                count = fetch_tiktok_draft_count(log=self.log)
                 if self.tiktok_manager:
-                    self.tiktok_manager.draft_count = count
-                    self.tiktok_manager.draft_count_checked = True
-                    if (
-                        not TIKTOK_AUTO_UPLOAD
-                        and not self.tiktok_manager.draft_capacity_blocked
-                    ):
-                        if count is None:
-                            self.tiktok_manager.draft_capacity_blocked = True
-                            self.tiktok_manager.draft_capacity_reason = (
-                                "No se pudo verificar la capacidad de borradores."
-                            )
-                        elif count >= 30:
-                            self.tiktok_manager.draft_capacity_blocked = True
-                            self.tiktok_manager.draft_capacity_reason = (
-                                "Se alcanzó el límite de 30 borradores."
-                            )
+                    count = self.tiktok_manager.refresh_draft_count()
+                else:
+                    count = fetch_tiktok_draft_count(log=self.log)
                 self.root.after(
                     0,
                     lambda value=count: self._on_tiktok_draft_count_result(value),
@@ -7353,43 +7413,43 @@ class TikTokClipAutomationApp:
             self.tiktok_manager = TikTokUploadManager(log_callback=self.log)
             self.tiktok_manager.start()
 
-        queued = self.tiktok_manager.enqueue(output_path, clip)
+        self.tiktok_manager.enqueue(output_path, clip)
+        state = self.tiktok_manager.load_state()
+        item = state.get("items", {}).get(str(output_path.resolve()))
 
-        # Puede existir un item de TikTok creado por discover_existing_reels()
-        # antes de que el watcher terminara de procesar este clip. enqueue()
-        # lo asocia con pipeline_clip_id cuando está pendiente; acá además
-        # sincronizamos cualquier estado terminal que ya exista.
-        if not queued:
-            state = self.tiktok_manager.load_state()
-            item = state.get("items", {}).get(str(output_path.resolve()))
+        if not item:
+            self.root.after(0, self._refresh_tiktok_queue)
+            return False
 
-            if item:
-                pipeline_clip_id = str(clip.get("id") or "").strip()
-                if pipeline_clip_id and not item.get("pipeline_clip_id"):
-                    item["pipeline_clip_id"] = pipeline_clip_id
-                    item["title"] = clip.get("title") or item.get("title") or output_path.stem
-                    item["caption"] = _caption_for_clip(clip)
-                    item["caption_source"] = (
-                        "omni"
-                        if TIKTOK_CAPTION_MODE == "omni"
-                        and clip.get("generated_caption")
-                        else item.get("caption_source", "template")
-                    )
-                    self.tiktok_manager.save_state(state)
-                    self.log(
-                        f"🔗 TikTok: item existente vinculado al clip "
-                        f"{pipeline_clip_id} → {output_path.name}"
-                    )
+        pipeline_clip_id = str(clip.get("id") or "").strip()
+        changed = False
+        if pipeline_clip_id and item.get("pipeline_clip_id") != pipeline_clip_id:
+            item["pipeline_clip_id"] = pipeline_clip_id
+            changed = True
 
-                if item.get("status") in {"uploaded", "draft_saved", "failed"}:
-                    _sync_pipeline_from_tiktok(
-                        item,
-                        item.get("status"),
-                        item.get("last_error"),
-                    )
+        title = clip.get("title") or output_path.stem
+        caption = _caption_for_clip(clip)
+        if title and title != item.get("title"):
+            item["title"] = title
+            changed = True
+        if caption and caption != item.get("caption"):
+            item["caption"] = caption
+            item["caption_source"] = (
+                "omni"
+                if TIKTOK_CAPTION_MODE == "omni" and clip.get("generated_caption")
+                else "template"
+            )
+            changed = True
+
+        if changed:
+            self.tiktok_manager.save_state(state)
+
+        status = item.get("status")
+        if status in {"uploaded", "draft_saved", "failed"}:
+            _sync_pipeline_from_tiktok(item, status, item.get("last_error"))
 
         self.root.after(0, self._refresh_tiktok_queue)
-        return queued
+        return True
 
     def stop_pipeline(self):
         self.stop_event.set()
@@ -7465,7 +7525,7 @@ class TikTokClipAutomationApp:
                 record = PIPELINE_REGISTRY.get(clip_id, {})
                 status = record.get("status")
 
-            if status in {"queued", "downloading", "downloaded", "processing", "processed"}:
+            if status in {"queued", "downloading", "downloaded", "process_queued", "processing", "processed", "awaiting_tiktok"}:
                 continue
 
             local_job = {
