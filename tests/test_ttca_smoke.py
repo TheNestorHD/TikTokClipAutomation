@@ -114,7 +114,9 @@ def main():
     namespace = load_functions()
 
     assert namespace["_coerce_text"]({"caption": "hola"}) == "hola"
-    assert namespace["_parse_tiktok_draft_count_texts"](["Posts 34", "Drafts 0"]) == [(0, "Drafts 0")]\n    assert namespace["_parse_tiktok_draft_count_texts"](["Posts 34", "Drafts: 10", "Borradores: 10"]) == [(10, "Drafts: 10"), (10, "Borradores: 10")]\n    assert namespace["_clip_channel_name"]({
+    assert namespace["_parse_tiktok_draft_count_texts"](["Posts 34", "Drafts 0"]) == [(0, "Drafts 0")]
+    assert namespace["_parse_tiktok_draft_count_texts"](["Posts 34", "Drafts: 10", "Borradores: 10"]) == [(10, "Drafts: 10"), (10, "Borradores: 10")]
+    assert namespace["_clip_channel_name"]({
         "channel": {
             "id": 45443815,
             "username": "clockerr",
