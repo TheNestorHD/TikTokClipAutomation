@@ -82,6 +82,12 @@ def load_functions():
     assert 'TIKTOK_AUTO_UPLOAD = env_bool("TIKTOK_AUTO_UPLOAD", False)' in source
     assert '(?:Drafts|Borradores)' in source
     assert 'self.draft_capacity_blocked' in source
+    assert 'TIKTOK_DRAFT_REFRESH_SECONDS' in source
+    assert '"queued_at": queued_at' in source
+    assert 'status="process_queued"' in source
+    assert 'process_queued' in source
+    assert 'cola FIFO' in source
+    assert 'La cola FIFO se reanuda automáticamente' in source
     assert 'self.root.after(0, self._drain_output_queue)' in source
     assert '("pipeline", "⚡", "Pipeline")' not in source
     assert 'REQUEST FAILED' in source
