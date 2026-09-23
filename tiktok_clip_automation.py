@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.5.3"
+APP_VERSION = "0.5.4"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -187,6 +187,7 @@ TIKTOK_MINIMIZED = env_bool("TIKTOK_MINIMIZED", True)
 TIKTOK_PROCESSING_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_PROCESSING_TIMEOUT_SECONDS", 180))
 TIKTOK_CONFIRM_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_CONFIRM_TIMEOUT_SECONDS", 90))
 TIKTOK_UPLOAD_CHECK_SECONDS = max(5, env_int("TIKTOK_UPLOAD_CHECK_SECONDS", 30))
+TIKTOK_DRAFT_REFRESH_SECONDS = max(15, env_int("TIKTOK_DRAFT_REFRESH_SECONDS", 30))
 TIKTOK_CAPTION_MODE = env_value("TIKTOK_CAPTION_MODE", "template").strip().lower()
 if TIKTOK_CAPTION_MODE not in {"template", "omni"}:
     TIKTOK_CAPTION_MODE = "template"
@@ -5308,7 +5309,7 @@ def _caption_for_clip(clip: dict) -> str:
 
 
 class TikTokUploadManager:
-    """Sube cada Reel inmediatamente: publica o guarda borrador según la configuración."""
+    """Gestiona una cola FIFO persistente de Reels para TikTok."""
 
     TERMINAL_STATUSES = {"uploaded", "draft_saved", "failed"}
     BLOCKED_STATUSES = {
@@ -5317,6 +5318,7 @@ class TikTokUploadManager:
         "queued",
         "uploading",
         "upload_interrupted",
+        "failed",
     }
 
     def __init__(self, log_callback=None):
@@ -5324,7 +5326,7 @@ class TikTokUploadManager:
         self.stop_event = threading.Event()
         self.wake_event = threading.Event()
         self.thread = None
-
+        self.draft_monitor_thread = None
         self.draft_count = None
         self.draft_count_checked = False
         self.draft_capacity_blocked = False
@@ -5342,18 +5344,12 @@ class TikTokUploadManager:
             guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
 
     def recover_interrupted_uploads(self):
-        """
-        Convierte cualquier 'uploading' persistido antes de un reinicio en
-        'upload_interrupted'. No se reencola automáticamente porque TikTok
-        puede haber aceptado el upload antes de que TTCA alcanzara a confirmar.
-        """
         changed = 0
         with TIKTOK_STATE_LOCK:
             state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
             for item in state.setdefault("items", {}).values():
                 if item.get("status") != "uploading":
                     continue
-
                 item["status"] = "upload_interrupted"
                 item["requires_manual_review"] = True
                 item["interrupted_at"] = datetime.now().isoformat()
@@ -5363,10 +5359,8 @@ class TikTokUploadManager:
                 )
                 item["scheduled_at"] = None
                 changed += 1
-
             if changed:
                 guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
-
         if changed:
             self.log(
                 f"  🛡️  TikTok: {changed} subida(s) interrumpida(s) quedaron "
@@ -5375,13 +5369,13 @@ class TikTokUploadManager:
         return changed
 
     def enqueue(self, video_path: Path, clip: dict | None = None):
+        """Persiste un Reel una sola vez, incluyendo caption y orden FIFO."""
         video_path = Path(video_path)
         if not video_path.exists():
             self.log(f"⚠️  TikTok: no existe {video_path}")
             return False
 
         key = str(video_path.resolve())
-
         with TIKTOK_STATE_LOCK:
             state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
             items = state.setdefault("items", {})
@@ -5389,9 +5383,8 @@ class TikTokUploadManager:
 
             if existing and existing.get("status") in self.BLOCKED_STATUSES:
                 if clip:
-                    pipeline_clip_id = str(clip.get("id") or "").strip()
                     changed = False
-
+                    pipeline_clip_id = str(clip.get("id") or "").strip()
                     if pipeline_clip_id and not existing.get("pipeline_clip_id"):
                         existing["pipeline_clip_id"] = pipeline_clip_id
                         changed = True
@@ -5406,8 +5399,7 @@ class TikTokUploadManager:
                         existing["caption"] = caption
                         existing["caption_source"] = (
                             "omni"
-                            if TIKTOK_CAPTION_MODE == "omni"
-                            and clip.get("generated_caption")
+                            if TIKTOK_CAPTION_MODE == "omni" and clip.get("generated_caption")
                             else existing.get("caption_source", "template")
                         )
                         changed = True
@@ -5422,30 +5414,31 @@ class TikTokUploadManager:
                 return False
 
             clip_data = clip or {"title": video_path.stem}
-            title = clip_data.get("title") or video_path.stem
-            pipeline_clip_id = str(clip_data.get("id") or "").strip()
+            queued_at = time.time()
             items[key] = {
                 "video_path": key,
-                "title": title,
-                "pipeline_clip_id": pipeline_clip_id or None,
+                "title": clip_data.get("title") or video_path.stem,
+                "pipeline_clip_id": str(clip_data.get("id") or "").strip() or None,
                 "caption": _caption_for_clip(clip_data),
                 "caption_source": (
                     "omni"
-                    if TIKTOK_CAPTION_MODE == "omni"
-                    and clip_data.get("generated_caption")
+                    if TIKTOK_CAPTION_MODE == "omni" and clip_data.get("generated_caption")
                     else "template"
                 ),
                 "publish_mode": "publish" if TIKTOK_AUTO_UPLOAD else "draft",
                 "status": "queued",
-                "created_at": time.time(),
+                "created_at": queued_at,
+                "queued_at": queued_at,
                 "scheduled_at": None,
                 "last_error": None,
                 "retry_count": 0,
             }
             guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
 
-        mode = "publicar" if TIKTOK_AUTO_UPLOAD else "guardar en borradores"
-        self.log(f"📤 TikTok: agregado para {mode} → {video_path.name}")
+        self.log(
+            f"📤 TikTok: agregado a cola FIFO → {video_path.name} | "
+            f"caption preparado"
+        )
         self.wake_event.set()
         return True
 
@@ -5458,48 +5451,74 @@ class TikTokUploadManager:
         with TIKTOK_STATE_LOCK:
             state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
             for item in state.setdefault("items", {}).values():
-                if (
-                    item.get("status") == "failed"
-                    and Path(item.get("video_path", "")).exists()
-                ):
+                if item.get("status") == "failed" and Path(item.get("video_path", "")).exists():
                     item["status"] = "queued"
+                    item["queued_at"] = time.time()
                     item["scheduled_at"] = None
                     item["last_error"] = None
                     item["retry_count"] = int(item.get("retry_count", 0)) + 1
                     item["publish_mode"] = "publish" if TIKTOK_AUTO_UPLOAD else "draft"
                     changed += 1
-
             if changed:
                 guardar_json(TIKTOK_UPLOAD_REGISTRY, state)
-
         if changed:
             self.wake_event.set()
-            self.log(f"🔁 TikTok: {changed} fallo(s) reencolado(s).")
+            self.log(f"🔁 TikTok: {changed} fallo(s) reencolado(s) al final de la cola FIFO.")
         return changed
 
-    def refresh_draft_count(self):
-        """Consulta el límite una vez por sesión y bloquea al llegar a 30."""
-        count = fetch_tiktok_draft_count(log=self.log)
+    def _apply_draft_count(self, count):
+        was_blocked = self.draft_capacity_blocked
+        previous_count = self.draft_count
         self.draft_count = count
         self.draft_count_checked = True
 
-        if not TIKTOK_AUTO_UPLOAD:
-            if count is None:
-                self.draft_capacity_blocked = True
-                self.draft_capacity_reason = "No se pudo verificar la capacidad de borradores."
+        if TIKTOK_AUTO_UPLOAD:
+            self.draft_capacity_blocked = False
+            self.draft_capacity_reason = ""
+            return count
+
+        if count is None:
+            self.draft_capacity_blocked = True
+            self.draft_capacity_reason = "No se pudo verificar la capacidad de borradores."
+            if not was_blocked:
                 self.log(
-                    "🛑 TikTok: no se pudo verificar el contador de borradores. "
-                    "No se harán nuevas subidas de borradores durante esta sesión."
+                    "🛑 TikTok: no se pudo verificar el contador. "
+                    "La cola queda detenida hasta obtener una lectura válida."
                 )
-            elif count >= 30:
-                self.draft_capacity_blocked = True
-                self.draft_capacity_reason = "Se alcanzó el límite de 30 borradores."
+        elif count >= 30:
+            self.draft_capacity_blocked = True
+            self.draft_capacity_reason = "Se alcanzó el límite de 30 borradores."
+            if not was_blocked or previous_count != count:
                 self.log(
-                    "🛑 TikTok: se alcanzó el límite de 30 borradores. "
-                    "Las nuevas subidas quedan pausadas hasta reiniciar TTCA."
+                    f"🛑 TikTok: {count}/30 borradores. "
+                    "Las nuevas subidas permanecen encoladas hasta liberar capacidad."
+                )
+        else:
+            self.draft_capacity_blocked = False
+            self.draft_capacity_reason = ""
+            if was_blocked:
+                self.log(
+                    f"✅ TikTok: capacidad liberada ({count}/30). "
+                    "La cola FIFO se reanuda automáticamente."
                 )
 
+        self.wake_event.set()
         return count
+
+    def refresh_draft_count(self):
+        return self._apply_draft_count(fetch_tiktok_draft_count(log=self.log))
+
+    def _draft_monitor_worker(self):
+        self.log(
+            f"🔎 Monitor de borradores activo: consulta cada "
+            f"{TIKTOK_DRAFT_REFRESH_SECONDS}s."
+        )
+        while not self.stop_event.wait(TIKTOK_DRAFT_REFRESH_SECONDS):
+            try:
+                self.refresh_draft_count()
+            except Exception as exc:
+                self.log(f"⚠️  Monitor de borradores: {exc}")
+            self.wake_event.set()
 
     def start(self):
         if self.thread and self.thread.is_alive():
@@ -5508,6 +5527,7 @@ class TikTokUploadManager:
         self.recover_interrupted_uploads()
         self.stop_event.clear()
         self.wake_event.clear()
+
         self.thread = threading.Thread(
             target=self._worker,
             name="TikTokUploadWorker",
@@ -5515,11 +5535,15 @@ class TikTokUploadManager:
         )
         self.thread.start()
 
-        mode = (
-            "publicación inmediata"
-            if TIKTOK_AUTO_UPLOAD
-            else "subida automática a borradores"
-        )
+        if not TIKTOK_AUTO_UPLOAD:
+            self.draft_monitor_thread = threading.Thread(
+                target=self._draft_monitor_worker,
+                name="TikTokDraftMonitor",
+                daemon=True,
+            )
+            self.draft_monitor_thread.start()
+
+        mode = "publicación inmediata" if TIKTOK_AUTO_UPLOAD else "subida automática a borradores"
         self.log(f"✅ TikTok iniciado: {mode}.")
 
     def stop(self):
@@ -5527,6 +5551,8 @@ class TikTokUploadManager:
         self.wake_event.set()
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=3)
+        if self.draft_monitor_thread and self.draft_monitor_thread.is_alive():
+            self.draft_monitor_thread.join(timeout=3)
         self.log("⏹️  TikTok automático detenido.")
 
     def _worker(self):
@@ -5534,25 +5560,33 @@ class TikTokUploadManager:
             self.refresh_draft_count()
 
         while not self.stop_event.is_set():
-            key = None
             item_snapshot = None
+            key = None
 
             with TIKTOK_STATE_LOCK:
                 state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
                 items = state.setdefault("items", {})
+                pending = [
+                    item for item in items.values()
+                    if item.get("status") == "queued"
+                    and Path(item.get("video_path", "")).exists()
+                ]
+                pending.sort(
+                    key=lambda x: (
+                        float(x.get("queued_at", x.get("created_at", 0)) or 0),
+                        str(x.get("video_path", "")),
+                    )
+                )
 
-                if not TIKTOK_AUTO_UPLOAD and self.draft_capacity_blocked:
-                    pending = []
-                else:
-                    pending = [
-                        item
-                        for item in items.values()
-                        if item.get("status") == "queued"
-                        and Path(item.get("video_path", "")).exists()
-                    ]
-                    pending.sort(key=lambda x: x.get("created_at", 0))
-
-                if pending:
+                allowed = (
+                    TIKTOK_AUTO_UPLOAD
+                    or (
+                        not self.draft_capacity_blocked
+                        and self.draft_count is not None
+                        and self.draft_count < 30
+                    )
+                )
+                if pending and allowed:
                     item = pending[0]
                     key = str(Path(item["video_path"]).resolve())
                     current = items.get(key)
@@ -5569,16 +5603,23 @@ class TikTokUploadManager:
                 continue
 
             video_path = Path(item_snapshot["video_path"])
-            publish_mode = item_snapshot.get(
+            save_draft = item_snapshot.get(
                 "publish_mode",
                 "publish" if TIKTOK_AUTO_UPLOAD else "draft",
-            )
-            save_draft = publish_mode == "draft"
+            ) == "draft"
 
-            action = "guardando borrador" if save_draft else "publicando"
+            queue_wait = max(
+                0.0,
+                time.time() - float(
+                    item_snapshot.get(
+                        "queued_at",
+                        item_snapshot.get("created_at", time.time()),
+                    )
+                ),
+            )
             self.log(
-                f"🚀 TikTok: {action} → {video_path.name} "
-                f"(estado persistido como UPLOADING antes del upload)"
+                f"🚀 TikTok: {'guardando borrador' if save_draft else 'publicando'} "
+                f"→ {video_path.name} (FIFO, espera {queue_wait:.0f}s)"
             )
 
             try:
@@ -5595,13 +5636,11 @@ class TikTokUploadManager:
 
             terminal_item = None
             terminal_status = "failed"
-
             with TIKTOK_STATE_LOCK:
                 latest_state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
                 latest_items = latest_state.setdefault("items", {})
                 current = latest_items.get(key)
 
-                # Si otra operación ya resolvió este item, no pisamos el estado terminal.
                 if current is None:
                     current = dict(item_snapshot)
                     latest_items[key] = current
@@ -5628,7 +5667,6 @@ class TikTokUploadManager:
                             else "La publicación no pudo confirmarse."
                         )
                         terminal_status = "failed"
-
                     guardar_json(TIKTOK_UPLOAD_REGISTRY, latest_state)
                     terminal_item = dict(current)
 
@@ -5646,31 +5684,14 @@ class TikTokUploadManager:
             )
 
             if terminal_status in {"uploaded", "draft_saved"}:
-                result_text = (
-                    "guardado en borradores"
-                    if save_draft
-                    else "publicado"
-                )
+                result_text = "guardado en borradores" if save_draft else "publicado"
                 if save_draft:
-                    if self.draft_count is not None:
-                        self.draft_count += 1
-                    else:
-                        self.draft_count = 30
-
-                    if self.draft_count >= 30:
-                        self.draft_capacity_blocked = True
-                        self.draft_capacity_reason = (
-                            "Se alcanzó el límite de 30 borradores durante esta sesión."
-                        )
-                        self.log(
-                            "🛑 TikTok: llegó a 30 borradores. "
-                            "La cola de TikTok queda pausada hasta reiniciar TTCA."
-                        )
+                    self._apply_draft_count((self.draft_count or 0) + 1)
                 self.log(f"✅ TikTok: {result_text} → {video_path.name}")
             else:
-                action_text = "guardar el borrador" if save_draft else "la publicación"
                 self.log(
-                    f"❌ TikTok: falló {video_path.name} al {action_text}. "
+                    f"❌ TikTok: falló {video_path.name} al "
+                    f"{'guardar el borrador' if save_draft else 'la publicación'}. "
                     "Queda en FALLIDO hasta reintentar desde la interfaz."
                 )
 
@@ -7639,7 +7660,7 @@ def reload_config_from_env():
     global TIKTOK_COOKIES_FILE, TIKTOK_HEADLESS, TIKTOK_AUTO_UPLOAD
     global TIKTOK_UPLOAD_RETRIES, TIKTOK_UPLOAD_RETRY_DELAY_SECONDS, TIKTOK_MINIMIZED
     global TIKTOK_PROCESSING_TIMEOUT_SECONDS, TIKTOK_CONFIRM_TIMEOUT_SECONDS
-    global TIKTOK_UPLOAD_CHECK_SECONDS, FFMPEG_PRIORITY, FFMPEG_THREADS
+    global TIKTOK_UPLOAD_CHECK_SECONDS, TIKTOK_DRAFT_REFRESH_SECONDS, FFMPEG_PRIORITY, FFMPEG_THREADS
     global TIKTOK_CAPTION_MODE, TIKTOK_CAPTION_TEMPLATE, TIKTOK_HASHTAGS, TIKTOK_UPLOAD_REGISTRY
     global JUST_CHATTING_MODE_ENABLED, JUST_CHATTING_RETENTION_DIR
 
@@ -7726,6 +7747,7 @@ def reload_config_from_env():
     TIKTOK_PROCESSING_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_PROCESSING_TIMEOUT_SECONDS", 180))
     TIKTOK_CONFIRM_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_CONFIRM_TIMEOUT_SECONDS", 90))
     TIKTOK_UPLOAD_CHECK_SECONDS = max(5, env_int("TIKTOK_UPLOAD_CHECK_SECONDS", 30))
+TIKTOK_DRAFT_REFRESH_SECONDS = max(15, env_int("TIKTOK_DRAFT_REFRESH_SECONDS", 30))
     FFMPEG_PRIORITY = env_value("FFMPEG_PRIORITY", "idle").strip().lower()
     if FFMPEG_PRIORITY not in {"normal", "below_normal", "idle"}:
         FFMPEG_PRIORITY = "idle"
