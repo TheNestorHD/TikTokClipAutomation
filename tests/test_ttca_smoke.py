@@ -72,6 +72,14 @@ def load_functions():
     assert 'post_draft/save' in source
     assert 'Borrador aceptado por TikTok' in source
     assert 'Subidas internas de TikTok estabilizadas' in source
+    assert 'TIKTOK_AUTO_UPLOAD = env_bool("TIKTOK_AUTO_UPLOAD", False)' in source
+    assert 'self.auto_upload_var = tk.BooleanVar(value=False)' in source
+    assert 'https://www.tiktok.com/tiktokstudio/content?tab=draft' in source
+    assert 'Header_HeaderTabBar_Container' in source
+    assert '(?:Drafts|Borradores)' in source
+    assert 'self.draft_capacity_blocked' in source
+    assert 'self.root.after(0, self._drain_output_queue)' in source
+    assert '("pipeline", "⚡", "Pipeline")' not in source
     assert 'REQUEST FAILED' in source
 
     tree = ast.parse(source, filename=str(SOURCE))
