@@ -3770,7 +3770,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                 print(
                     f"  ♻️  Reanudado desde disco: {local_path.name}"
                 )
-            elif status in {"queued", "downloading", "processing", "downloaded"}:
+            elif status in {"queued", "downloading", "process_queued", "processing", "downloaded"}:
                 registry_update(
                     clip_id,
                     status="discovered",
