@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.5.1"
+APP_VERSION = "0.5.2"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -5165,25 +5165,66 @@ def fetch_tiktok_draft_count(log=print) -> int | None:
             log("→ Consultando cantidad de borradores de TikTok...")
             page.goto(url, timeout=60000, wait_until="domcontentloaded")
 
-            counter = page.locator(
-                'div[data-tt="Header_HeaderTabBar_Container"]'
-            ).first
-            counter.wait_for(state="visible", timeout=15000)
-
             import re
-            text_value = counter.inner_text().strip()
-            match = re.search(
-                r"(?:Drafts|Borradores)\s*:\s*(\d+)",
-                text_value,
+
+            # La barra contiene varios contadores (por ejemplo "Posts 34" y
+            # "Drafts: 10"). No usamos .first porque el primer elemento puede
+            # corresponder a Posts y no a Borradores.
+            counters = page.locator(
+                'div[data-tt="Header_HeaderTabBar_Container"]'
+            )
+            counters.first.wait_for(state="visible", timeout=15000)
+
+            texts = counters.all_inner_texts()
+            log(
+                "  🔎 Contadores encontrados en TikTok: "
+                + " | ".join(text.strip() for text in texts if text.strip())
+            )
+
+            count = None
+            matched_text = None
+            pattern = re.compile(
+                r"^\s*(?:Drafts|Borradores)\s*:?\s*(\d+)\s*$",
                 re.IGNORECASE,
             )
-            if not match:
+
+            for text_value in texts:
+                match = pattern.search(text_value.strip())
+                if match:
+                    count = int(match.group(1))
+                    matched_text = text_value.strip()
+                    break
+
+            # Fallback: buscar directamente un nodo visible que contenga
+            # "Drafts N" / "Borradores N" por si cambia ligeramente la estructura.
+            if count is None:
+                fallback = page.get_by_text(
+                    re.compile(
+                        r"\b(?:Drafts|Borradores)\s*:?\s*\d+\b",
+                        re.IGNORECASE,
+                    )
+                )
+                try:
+                    fallback.wait_for(state="visible", timeout=3000)
+                    for candidate in fallback.all_inner_texts():
+                        match = pattern.search(candidate.strip())
+                        if match:
+                            count = int(match.group(1))
+                            matched_text = candidate.strip()
+                            break
+                except Exception:
+                    pass
+
+            if count is None:
                 raise RuntimeError(
-                    f"No se pudo interpretar el contador de borradores: {text_value!r}"
+                    "No se pudo interpretar el contador de borradores. "
+                    f"Contadores detectados: {texts!r}"
                 )
 
-            count = int(match.group(1))
-            log(f"  ✓ Borradores detectados en TikTok: {count}/30")
+            log(
+                f"  ✓ Borradores detectados en TikTok: {count}/30 "
+                f"({matched_text})"
+            )
             return count
     except Exception as exc:
         log(f"⚠️  No se pudo consultar los borradores de TikTok: {exc}")
