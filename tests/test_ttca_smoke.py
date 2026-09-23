@@ -68,6 +68,9 @@ def load_functions():
     assert 'desc.inner_text(timeout=1000)' in source
     assert 'Forzamos blur' in source
     assert '_wait_for_tiktok_upload_quiet' in source
+    assert 'draft_save_success = threading.Event()' in source
+    assert 'post_draft/save' in source
+    assert 'Borrador aceptado por TikTok' in source
     assert 'Subidas internas de TikTok estabilizadas' in source
     assert 'REQUEST FAILED' in source
 
