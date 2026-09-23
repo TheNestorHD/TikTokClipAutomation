@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.5.1"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -180,7 +180,7 @@ TIKTOK_COOKIES_FILE = resolve_path(
     env_value("TIKTOK_COOKIES_FILE", DEFAULT_RELATIVE_PATHS["TIKTOK_COOKIES_FILE"])
 )
 TIKTOK_HEADLESS = env_bool("TIKTOK_HEADLESS", True)
-TIKTOK_AUTO_UPLOAD = env_bool("TIKTOK_AUTO_UPLOAD", True)
+TIKTOK_AUTO_UPLOAD = env_bool("TIKTOK_AUTO_UPLOAD", False)
 TIKTOK_UPLOAD_RETRIES = max(1, env_int("TIKTOK_UPLOAD_RETRIES", 3))
 TIKTOK_UPLOAD_RETRY_DELAY_SECONDS = max(0, env_int("TIKTOK_UPLOAD_RETRY_DELAY_SECONDS", 0))
 TIKTOK_MINIMIZED = env_bool("TIKTOK_MINIMIZED", True)
@@ -5127,6 +5127,75 @@ def guardar_json(path: Path, data):
         os.fsync(f.fileno())
     os.replace(tmp, path)
 
+def fetch_tiktok_draft_count(log=print) -> int | None:
+    """Consulta el contador de borradores visible en TikTok Studio."""
+    global sync_playwright
+
+    if sync_playwright is None:
+        from playwright.sync_api import sync_playwright as _sync_playwright
+        sync_playwright = _sync_playwright
+
+    if not TIKTOK_COOKIES_FILE.exists():
+        log(f"⚠️  No existe el archivo de cookies de TikTok: {TIKTOK_COOKIES_FILE}")
+        return None
+
+    browser = None
+    try:
+        with sync_playwright() as p:
+            args = ["--disable-blink-features=AutomationControlled"]
+            if not TIKTOK_HEADLESS and TIKTOK_MINIMIZED:
+                args.append("--window-position=-32000,-32000")
+
+            browser = p.chromium.launch(
+                headless=TIKTOK_HEADLESS,
+                args=args,
+            )
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/129.0.0.0 Safari/537.36"
+                ),
+            )
+            cargar_cookies(context, TIKTOK_COOKIES_FILE)
+            page = context.new_page()
+
+            url = "https://www.tiktok.com/tiktokstudio/content?tab=draft"
+            log("→ Consultando cantidad de borradores de TikTok...")
+            page.goto(url, timeout=60000, wait_until="domcontentloaded")
+
+            counter = page.locator(
+                'div[data-tt="Header_HeaderTabBar_Container"]'
+            ).first
+            counter.wait_for(state="visible", timeout=15000)
+
+            import re
+            text_value = counter.inner_text().strip()
+            match = re.search(
+                r"(?:Drafts|Borradores)\s*:\s*(\d+)",
+                text_value,
+                re.IGNORECASE,
+            )
+            if not match:
+                raise RuntimeError(
+                    f"No se pudo interpretar el contador de borradores: {text_value!r}"
+                )
+
+            count = int(match.group(1))
+            log(f"  ✓ Borradores detectados en TikTok: {count}/30")
+            return count
+    except Exception as exc:
+        log(f"⚠️  No se pudo consultar los borradores de TikTok: {exc}")
+        return None
+    finally:
+        try:
+            if browser is not None:
+                browser.close()
+        except Exception:
+            pass
+
+
 def _caption_for_clip(clip: dict) -> str:
     title = (clip.get("title") or "Nuevo clip").strip()
 
@@ -5173,6 +5242,11 @@ class TikTokUploadManager:
         self.stop_event = threading.Event()
         self.wake_event = threading.Event()
         self.thread = None
+
+        self.draft_count = None
+        self.draft_count_checked = False
+        self.draft_capacity_blocked = False
+        self.draft_capacity_reason = ""
 
     def log(self, msg):
         self.log_callback(msg)
@@ -5321,6 +5395,30 @@ class TikTokUploadManager:
             self.log(f"🔁 TikTok: {changed} fallo(s) reencolado(s).")
         return changed
 
+    def refresh_draft_count(self):
+        """Consulta el límite una vez por sesión y bloquea al llegar a 30."""
+        count = fetch_tiktok_draft_count(log=self.log)
+        self.draft_count = count
+        self.draft_count_checked = True
+
+        if not TIKTOK_AUTO_UPLOAD:
+            if count is None:
+                self.draft_capacity_blocked = True
+                self.draft_capacity_reason = "No se pudo verificar la capacidad de borradores."
+                self.log(
+                    "🛑 TikTok: no se pudo verificar el contador de borradores. "
+                    "No se harán nuevas subidas de borradores durante esta sesión."
+                )
+            elif count >= 30:
+                self.draft_capacity_blocked = True
+                self.draft_capacity_reason = "Se alcanzó el límite de 30 borradores."
+                self.log(
+                    "🛑 TikTok: se alcanzó el límite de 30 borradores. "
+                    "Las nuevas subidas quedan pausadas hasta reiniciar TTCA."
+                )
+
+        return count
+
     def start(self):
         if self.thread and self.thread.is_alive():
             return
@@ -5350,6 +5448,9 @@ class TikTokUploadManager:
         self.log("⏹️  TikTok automático detenido.")
 
     def _worker(self):
+        if not self.draft_count_checked:
+            self.refresh_draft_count()
+
         while not self.stop_event.is_set():
             key = None
             item_snapshot = None
@@ -5357,13 +5458,17 @@ class TikTokUploadManager:
             with TIKTOK_STATE_LOCK:
                 state = cargar_json(TIKTOK_UPLOAD_REGISTRY, {"items": {}})
                 items = state.setdefault("items", {})
-                pending = [
-                    item
-                    for item in items.values()
-                    if item.get("status") == "queued"
-                    and Path(item.get("video_path", "")).exists()
-                ]
-                pending.sort(key=lambda x: x.get("created_at", 0))
+
+                if not TIKTOK_AUTO_UPLOAD and self.draft_capacity_blocked:
+                    pending = []
+                else:
+                    pending = [
+                        item
+                        for item in items.values()
+                        if item.get("status") == "queued"
+                        and Path(item.get("video_path", "")).exists()
+                    ]
+                    pending.sort(key=lambda x: x.get("created_at", 0))
 
                 if pending:
                     item = pending[0]
@@ -5464,6 +5569,21 @@ class TikTokUploadManager:
                     if save_draft
                     else "publicado"
                 )
+                if save_draft:
+                    if self.draft_count is not None:
+                        self.draft_count += 1
+                    else:
+                        self.draft_count = 30
+
+                    if self.draft_count >= 30:
+                        self.draft_capacity_blocked = True
+                        self.draft_capacity_reason = (
+                            "Se alcanzó el límite de 30 borradores durante esta sesión."
+                        )
+                        self.log(
+                            "🛑 TikTok: llegó a 30 borradores. "
+                            "La cola de TikTok queda pausada hasta reiniciar TTCA."
+                        )
                 self.log(f"✅ TikTok: {result_text} → {video_path.name}")
             else:
                 action_text = "guardar el borrador" if save_draft else "la publicación"
@@ -5551,12 +5671,16 @@ class TikTokClipAutomationApp:
         self.download_queue_var = tk.StringVar(value="0")
         self.process_queue_var = tk.StringVar(value="0")
         self.tiktok_queue_var = tk.StringVar(value="0")
+        self.tiktok_drafts_var = tk.StringVar(value="Sin consultar")
+        self.tiktok_capacity_warning_var = tk.StringVar(
+            value="Capacidad de borradores: todavía no consultada."
+        )
         self.processed_var = tk.StringVar(value="0")
         self.failed_var = tk.StringVar(value="0")
         self.dedupe_var = tk.StringVar(value="0")
         self.ffmpeg_var = tk.StringVar(value="Muy baja · Idle")
 
-        self.auto_upload_var = tk.BooleanVar(value=True)
+        self.auto_upload_var = tk.BooleanVar(value=False)
         self.headless_var = tk.BooleanVar(value=True)
         self.ffmpeg_priority_var = tk.StringVar(value="idle")
 
@@ -5579,6 +5703,7 @@ class TikTokClipAutomationApp:
         self._build_ui()
         self._refresh_config_vars()
         self._install_output_redirect()
+        self.root.after(0, self._drain_output_queue)
 
         self._show_page("dashboard")
         self._tick_ui()
@@ -5679,7 +5804,6 @@ class TikTokClipAutomationApp:
         nav = [
             ("dashboard", "⌂", "Inicio"),
             ("setup", "⚙", "Configuración"),
-            ("pipeline", "⚡", "Pipeline"),
             ("tiktok", "▶", "TikTok"),
             ("activity", "≡", "Actividad"),
         ]
@@ -5756,7 +5880,7 @@ class TikTokClipAutomationApp:
         self.pages_container.pack(fill="both", expand=True, padx=28, pady=(8, 22))
 
         self.pages = {}
-        for page_id in ("dashboard", "setup", "pipeline", "tiktok", "activity"):
+        for page_id in ("dashboard", "setup", "tiktok", "activity"):
             page = self.ctk.CTkFrame(
                 self.pages_container,
                 fg_color=self.BG,
@@ -5766,11 +5890,12 @@ class TikTokClipAutomationApp:
 
         self._build_dashboard(self.pages["dashboard"])
         self._build_setup(self.pages["setup"])
-        self._build_pipeline(self.pages["pipeline"])
         self._build_tiktok(self.pages["tiktok"])
         self._build_activity(self.pages["activity"])
 
     def _show_page(self, page_id):
+        if page_id == "pipeline":
+            page_id = "dashboard"
         for page in self.pages.values():
             page.pack_forget()
         self.pages[page_id].pack(fill="both", expand=True)
@@ -5779,7 +5904,6 @@ class TikTokClipAutomationApp:
         labels = {
             "dashboard": ("Inicio", "Resumen del sistema y estado del pipeline."),
             "setup": ("Configuración", "Configuración guiada: sin tocar archivos a mano."),
-            "pipeline": ("Pipeline", "Descarga, IA, Whisper y render, todo supervisado."),
             "tiktok": ("TikTok", "Publicación automática en cuanto termina cada Reel."),
             "activity": ("Actividad", "Logs en vivo y diagnóstico."),
         }
@@ -5881,6 +6005,34 @@ class TikTokClipAutomationApp:
         stats = self.ctk.CTkFrame(parent, fg_color="transparent")
         stats.pack(fill="x", pady=(0, 15))
         self._build_stat_update_cards(stats)
+
+        capacity = self._frame(parent, fg_color=self.CARD)
+        capacity.pack(fill="x", pady=(0, 15))
+        left_capacity = self.ctk.CTkFrame(capacity, fg_color="transparent")
+        left_capacity.pack(side="left", fill="both", expand=True, padx=18, pady=13)
+        self._label(
+            left_capacity,
+            "BORRADORES DE TIKTOK",
+            size=10,
+            color=self.MUTED,
+            bold=True,
+        ).pack(anchor="w")
+        self.dashboard_tiktok_drafts = self._label(
+            left_capacity,
+            textvariable=self.tiktok_drafts_var,
+            size=19,
+            bold=True,
+        )
+        self.dashboard_tiktok_drafts.pack(anchor="w", pady=(3, 0))
+        self.dashboard_tiktok_warning = self._label(
+            capacity,
+            textvariable=self.tiktok_capacity_warning_var,
+            size=11,
+            color=self.YELLOW,
+            wraplength=610,
+            justify="left",
+        )
+        self.dashboard_tiktok_warning.pack(side="right", padx=18, pady=13)
 
         lower = self.ctk.CTkFrame(parent, fg_color="transparent")
         lower.pack(fill="both", expand=True)
@@ -6037,7 +6189,7 @@ class TikTokClipAutomationApp:
         self._label(body, "TikTok: publicación o borradores", size=15, bold=True).pack(anchor="w")
         self._label(
             body,
-            "Cada Reel terminado se sube automáticamente. El interruptor decide si se publica de inmediato o se guarda como borrador.",
+            "Cada Reel terminado se envía automáticamente. El interruptor decide si se publica de inmediato o se guarda como borrador. TikTok permite hasta 30 borradores; TTCA pausará nuevas subidas al alcanzar ese límite hasta el próximo reinicio.",
             size=11,
             color=self.MUTED,
             wraplength=720,
@@ -6528,7 +6680,7 @@ class TikTokClipAutomationApp:
         )
         self._label(
             intro,
-            "Cuando termina un Reel, entra directamente a TikTok. El modo activo publica; el modo desactivado guarda el Reel como borrador.",
+            "Cada Reel terminado entra automáticamente a TikTok. El modo activo publica; el modo desactivado guarda el Reel como borrador. TTCA consulta el contador real de TikTok Studio y pausa la cola al llegar a 30 borradores.",
             size=11,
             color=self.MUTED,
         ).pack(anchor="w", padx=18, pady=(0, 14))
@@ -6538,6 +6690,43 @@ class TikTokClipAutomationApp:
         self._label(row, "Destino:", size=11, color=self.MUTED, bold=True).pack(side="left")
         self.tiktok_status_big = self._label(row, "Desactivada", size=12, color=self.RED, bold=True)
         self.tiktok_status_big.pack(side="left", padx=7)
+
+        capacity_card = self._frame(parent, fg_color=self.CARD)
+        capacity_card.pack(fill="x", pady=(0, 10))
+        capacity_left = self.ctk.CTkFrame(capacity_card, fg_color="transparent")
+        capacity_left.pack(side="left", fill="x", expand=True, padx=18, pady=12)
+        self._label(
+            capacity_left,
+            "CAPACIDAD DE BORRADORES",
+            size=10,
+            color=self.MUTED,
+            bold=True,
+        ).pack(anchor="w")
+        self.tiktok_drafts_label = self._label(
+            capacity_left,
+            textvariable=self.tiktok_drafts_var,
+            size=20,
+            bold=True,
+        )
+        self.tiktok_drafts_label.pack(anchor="w", pady=(2, 0))
+        self.tiktok_capacity_detail = self._label(
+            capacity_left,
+            textvariable=self.tiktok_capacity_warning_var,
+            size=10,
+            color=self.MUTED,
+            wraplength=750,
+            justify="left",
+        )
+        self.tiktok_capacity_detail.pack(anchor="w", pady=(2, 0))
+
+        capacity_actions = self.ctk.CTkFrame(capacity_card, fg_color="transparent")
+        capacity_actions.pack(side="right", padx=18, pady=12)
+        self._button(
+            capacity_actions,
+            "↻ Actualizar borradores",
+            self.refresh_tiktok_drafts_async,
+            width=155,
+        ).pack(anchor="e")
 
         queue = self._frame(parent, fg_color=self.CARD)
         queue.pack(fill="both", expand=True)
@@ -6650,7 +6839,7 @@ class TikTokClipAutomationApp:
             var = self._ensure_var(key)
             var.set(str(env_value(key, defaults.get(key, ""))))
 
-        self.auto_upload_var.set(env_bool("TIKTOK_AUTO_UPLOAD", True))
+        self.auto_upload_var.set(env_bool("TIKTOK_AUTO_UPLOAD", False))
         self.headless_var.set(env_bool("TIKTOK_HEADLESS", True))
         if hasattr(self, "just_chatting_mode_var"):
             self.just_chatting_mode_var.set(
@@ -6825,6 +7014,95 @@ class TikTokClipAutomationApp:
         if path:
             self._ensure_var(key).set(path)
 
+    def _on_tiktok_draft_count_result(self, count):
+        self.tiktok_drafts_var.set(
+            f"{count}/30" if count is not None else "No disponible"
+        )
+
+        manager = self.tiktok_manager
+        if TIKTOK_AUTO_UPLOAD:
+            if count is None:
+                message = (
+                    "ℹ️ No se pudo consultar el contador. "
+                    "La publicación automática no depende del límite de borradores."
+                )
+            else:
+                message = (
+                    f"ℹ️ Publicación automática activa. "
+                    f"Hay {count}/30 borradores; este límite no bloquea las publicaciones."
+                )
+        elif count is None:
+            message = (
+                "🛑 No se pudo consultar TikTok. "
+                "La cola de borradores queda bloqueada durante esta sesión por seguridad."
+            )
+        elif manager and manager.draft_capacity_blocked:
+            message = (
+                "🛑 La cola de borradores está pausada hasta reiniciar TTCA. "
+                "Revisá/publicá los borradores de TikTok."
+            )
+        elif count >= 27:
+            message = (
+                "⚠️ Capacidad casi agotada. "
+                "Se recomienda contar con un moderador que revise y publique borradores periódicamente."
+            )
+        else:
+            message = (
+                "✅ Capacidad disponible. "
+                "Si el directo genera muchos clips, se recomienda supervisar la bandeja de borradores."
+            )
+
+        self.tiktok_capacity_warning_var.set(message)
+        color = (
+            self.RED
+            if count is None or (count >= 30 and not TIKTOK_AUTO_UPLOAD)
+            else self.YELLOW
+            if count >= 27
+            else self.GREEN
+        )
+        if hasattr(self, "dashboard_tiktok_drafts"):
+            self.dashboard_tiktok_drafts.configure(text_color=color)
+        if hasattr(self, "tiktok_drafts_label"):
+            self.tiktok_drafts_label.configure(text_color=color)
+
+    def refresh_tiktok_drafts_async(self):
+        if getattr(self, "_tiktok_draft_refresh_running", False):
+            return
+        self._tiktok_draft_refresh_running = True
+
+        def worker():
+            try:
+                count = fetch_tiktok_draft_count(log=self.log)
+                if self.tiktok_manager:
+                    self.tiktok_manager.draft_count = count
+                    self.tiktok_manager.draft_count_checked = True
+                    if (
+                        not TIKTOK_AUTO_UPLOAD
+                        and not self.tiktok_manager.draft_capacity_blocked
+                    ):
+                        if count is None:
+                            self.tiktok_manager.draft_capacity_blocked = True
+                            self.tiktok_manager.draft_capacity_reason = (
+                                "No se pudo verificar la capacidad de borradores."
+                            )
+                        elif count >= 30:
+                            self.tiktok_manager.draft_capacity_blocked = True
+                            self.tiktok_manager.draft_capacity_reason = (
+                                "Se alcanzó el límite de 30 borradores."
+                            )
+                self.root.after(
+                    0,
+                    lambda value=count: self._on_tiktok_draft_count_result(value),
+                )
+            finally:
+                self._tiktok_draft_refresh_running = False
+
+        threading.Thread(
+            target=worker,
+            name="TikTokDraftCount",
+            daemon=True,
+        ).start()
+
     def _open_url(self, url):
         try:
             webbrowser.open(url)
@@ -6932,7 +7210,8 @@ class TikTokClipAutomationApp:
             self.start_time = time.time()
             self.status_var.set("Ejecutando")
             self.header_status.configure(text="Ejecutando")
-            self.pipeline_status_label.configure(text="Ejecutando", text_color=self.GREEN)
+            if hasattr(self, "pipeline_status_label"):
+                self.pipeline_status_label.configure(text="Ejecutando", text_color=self.GREEN)
             self.watcher_var.set(f"Activo · /{KICK_CHANNEL}")
             self.tiktok_var.set(
                 "Activo · publicación inmediata"
@@ -7021,7 +7300,8 @@ class TikTokClipAutomationApp:
         self.running = False
         self.status_var.set("Detenido")
         self.header_status.configure(text="Detenido")
-        self.pipeline_status_label.configure(text="Detenido", text_color=self.RED)
+        if hasattr(self, "pipeline_status_label"):
+            self.pipeline_status_label.configure(text="Detenido", text_color=self.RED)
         self.start_button.configure(state="normal")
         self.stop_button.configure(state="disabled")
         self.activity_progress.stop()
@@ -7198,6 +7478,10 @@ class TikTokClipAutomationApp:
                 text="Activa · inmediata" if TIKTOK_AUTO_UPLOAD else "Activa · borradores",
                 text_color=self.GREEN,
             )
+            if self.tiktok_manager:
+                self._on_tiktok_draft_count_result(
+                    self.tiktok_manager.draft_count
+                )
             self._refresh_tiktok_queue()
         except Exception:
             pass
@@ -7353,7 +7637,7 @@ def reload_config_from_env():
         env_value("TIKTOK_COOKIES_FILE", DEFAULT_RELATIVE_PATHS["TIKTOK_COOKIES_FILE"])
     )
     TIKTOK_HEADLESS = env_bool("TIKTOK_HEADLESS", True)
-    TIKTOK_AUTO_UPLOAD = env_bool("TIKTOK_AUTO_UPLOAD", True)
+    TIKTOK_AUTO_UPLOAD = env_bool("TIKTOK_AUTO_UPLOAD", False)
     TIKTOK_UPLOAD_RETRIES = max(1, env_int("TIKTOK_UPLOAD_RETRIES", 3))
     TIKTOK_UPLOAD_RETRY_DELAY_SECONDS = max(0, env_int("TIKTOK_UPLOAD_RETRY_DELAY_SECONDS", 0))
     TIKTOK_MINIMIZED = env_bool("TIKTOK_MINIMIZED", True)
