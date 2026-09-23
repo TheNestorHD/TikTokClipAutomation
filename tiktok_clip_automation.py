@@ -5127,6 +5127,23 @@ def guardar_json(path: Path, data):
         os.fsync(f.fileno())
     os.replace(tmp, path)
 
+def _parse_tiktok_draft_count_texts(texts) -> list[tuple[int, str]]:
+    """Extrae candidatos Drafts/Borradores sin confundir valores de otros contadores."""
+    import re
+
+    pattern = re.compile(
+        r"^\\s*(?:Drafts|Borradores)\\s*:?[\\s]*(\\d+)\\s*$",
+        re.IGNORECASE,
+    )
+    matches = []
+    for value in texts or []:
+        text_value = str(value or "").strip()
+        match = pattern.match(text_value)
+        if match:
+            matches.append((int(match.group(1)), text_value))
+    return matches
+
+
 def fetch_tiktok_draft_count(log=print) -> int | None:
     """Consulta el contador de borradores visible en TikTok Studio."""
     global sync_playwright
@@ -5165,67 +5182,91 @@ def fetch_tiktok_draft_count(log=print) -> int | None:
             log("→ Consultando cantidad de borradores de TikTok...")
             page.goto(url, timeout=60000, wait_until="domcontentloaded")
 
-            import re
+            # TikTok puede renderizar primero "Drafts 0" y reemplazarlo luego
+            # con el contador real cuando termina la hidratación de Studio.
+            # Esperamos unos segundos y muestreamos los elementos visibles.
+            deadline = time.time() + 12
+            last_visible = []
+            zero_seen = False
 
-            # La barra contiene varios contadores (por ejemplo "Posts 34" y
-            # "Drafts: 10"). No usamos .first porque el primer elemento puede
-            # corresponder a Posts y no a Borradores.
-            counters = page.locator(
-                'div[data-tt="Header_HeaderTabBar_Container"]'
-            )
-            counters.first.wait_for(state="visible", timeout=15000)
-
-            texts = counters.all_inner_texts()
-            log(
-                "  🔎 Contadores encontrados en TikTok: "
-                + " | ".join(text.strip() for text in texts if text.strip())
-            )
-
-            count = None
-            matched_text = None
-            pattern = re.compile(
-                r"^\s*(?:Drafts|Borradores)\s*:?\s*(\d+)\s*$",
-                re.IGNORECASE,
-            )
-
-            for text_value in texts:
-                match = pattern.search(text_value.strip())
-                if match:
-                    count = int(match.group(1))
-                    matched_text = text_value.strip()
-                    break
-
-            # Fallback: buscar directamente un nodo visible que contenga
-            # "Drafts N" / "Borradores N" por si cambia ligeramente la estructura.
-            if count is None:
-                fallback = page.get_by_text(
-                    re.compile(
-                        r"\b(?:Drafts|Borradores)\s*:?\s*\d+\b",
-                        re.IGNORECASE,
-                    )
+            while time.time() < deadline:
+                counters = page.locator(
+                    'div[data-tt="Header_HeaderTabBar_Container"]:visible'
                 )
                 try:
-                    fallback.wait_for(state="visible", timeout=3000)
-                    for candidate in fallback.all_inner_texts():
-                        match = pattern.search(candidate.strip())
-                        if match:
-                            count = int(match.group(1))
-                            matched_text = candidate.strip()
-                            break
+                    counters.first.wait_for(state="visible", timeout=3000)
                 except Exception:
                     pass
 
-            if count is None:
-                raise RuntimeError(
-                    "No se pudo interpretar el contador de borradores. "
-                    f"Contadores detectados: {texts!r}"
-                )
+                visible_texts = [
+                    text.strip()
+                    for text in counters.all_inner_texts()
+                    if text and text.strip()
+                ]
 
-            log(
-                f"  ✓ Borradores detectados en TikTok: {count}/30 "
-                f"({matched_text})"
+                # También inspeccionamos nodos visibles que contengan
+                # explícitamente "Drafts N" / "Borradores N", por si cambia
+                # la estructura del encabezado.
+                fallback_texts = []
+                try:
+                    fallback = page.get_by_text(
+                        re.compile(
+                            r"\\b(?:Drafts|Borradores)\\s*:?[\\s]*\\d+\\b",
+                            re.IGNORECASE,
+                        )
+                    )
+                    fallback_texts = [
+                        text.strip()
+                        for text in fallback.all_inner_texts()
+                        if text and text.strip()
+                    ]
+                except Exception:
+                    pass
+
+                candidates = []
+                seen = set()
+                for value in visible_texts + fallback_texts:
+                    if value not in seen:
+                        seen.add(value)
+                        candidates.append(value)
+
+                if candidates:
+                    last_visible = candidates
+                    log(
+                        "  🔎 Contadores visibles en TikTok: "
+                        + " | ".join(candidates)
+                    )
+
+                parsed = _parse_tiktok_draft_count_texts(candidates)
+                positive = [(count, label) for count, label in parsed if count > 0]
+                if positive:
+                    count, matched_text = positive[0]
+                    log(
+                        f"  ✓ Borradores detectados en TikTok: {count}/30 "
+                        f"({matched_text})"
+                    )
+                    return count
+
+                if parsed:
+                    zero_seen = True
+
+                time.sleep(0.75)
+
+            # Si después de esperar TikTok siguió mostrando explícitamente 0,
+            # ese sí es un resultado válido. No lo confundimos con un fallo.
+            parsed = _parse_tiktok_draft_count_texts(last_visible)
+            if zero_seen and parsed:
+                count, matched_text = parsed[0]
+                log(
+                    f"  ✓ Borradores detectados en TikTok: {count}/30 "
+                    f"({matched_text})"
+                )
+                return count
+
+            raise RuntimeError(
+                "No se pudo interpretar el contador de borradores. "
+                f"Contadores visibles detectados: {last_visible!r}"
             )
-            return count
     except Exception as exc:
         log(f"⚠️  No se pudo consultar los borradores de TikTok: {exc}")
         return None
@@ -5235,8 +5276,6 @@ def fetch_tiktok_draft_count(log=print) -> int | None:
                 browser.close()
         except Exception:
             pass
-
-
 def _caption_for_clip(clip: dict) -> str:
     title = (clip.get("title") or "Nuevo clip").strip()
 
