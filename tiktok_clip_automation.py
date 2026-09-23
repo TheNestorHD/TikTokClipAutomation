@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.4.9"
+APP_VERSION = "0.5.0"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -4606,11 +4606,25 @@ def _subir_video_intento(
                 # variantes ciegas de click, inspeccionamos el objetivo real y usamos
                 # también activación por teclado.
                 save_network_events = []
+                draft_save_success = threading.Event()
 
                 def _log_save_response(response):
                     try:
                         url = response.url
                         lowered = url.lower()
+
+                        if "/tiktok_creator/editor_tool/api/v1/post_draft/save" in lowered:
+                            save_network_events.append(
+                                f"HTTP {response.status} {url[:260]}"
+                            )
+                            if 200 <= response.status < 300:
+                                draft_save_success.set()
+                                print(
+                                    f"  ✅ TikTok confirmó post_draft/save "
+                                    f"(HTTP {response.status})"
+                                )
+                            return
+
                         if any(
                             token in lowered
                             for token in (
@@ -4804,13 +4818,15 @@ def _subir_video_intento(
                     f"activas={len(tiktok_upload_activity['active'])}"
                 )
 
-                guardado = False
+                guardado = draft_save_success.is_set()
+                if guardado:
+                    print("  ✓ Borrador aceptado por TikTok; no esperamos 90s.")
                 deadline = time.time() + TIKTOK_CONFIRM_TIMEOUT_SECONDS
                 upload_url = page.url
                 last_event_count = len(save_network_events)
                 silent_deadline = time.time() + 12
 
-                while time.time() < deadline:
+                while not guardado and time.time() < deadline:
                     try:
                         content = page.content().lower()
                         url = page.url.lower()
@@ -4836,6 +4852,10 @@ def _subir_video_intento(
                             "try again" in content,
                             "failed" in content and "upload" in content,
                         ])
+
+                        if draft_save_success.is_set():
+                            guardado = True
+                            break
 
                         if exito and not fallo:
                             guardado = True
@@ -4901,10 +4921,17 @@ def _subir_video_intento(
                             break
 
                     except Exception as poll_error:
+                        if draft_save_success.is_set():
+                            guardado = True
+                            break
                         print(
                             f"  ⚠️  Estado de guardado temporalmente ilegible: "
                             f"{str(poll_error).splitlines()[0]}"
                         )
+
+                    if draft_save_success.is_set():
+                        guardado = True
+                        break
 
                     time.sleep(1)
 
