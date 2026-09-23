@@ -88,6 +88,10 @@ def load_functions():
     assert 'process_queued' in source
     assert 'cola FIFO' in source
     assert 'La cola FIFO se reanuda automáticamente' in source
+    assert 'def _update_stage_from_runtime(self, stats):' in source
+    assert 'self.stage_var.set("Buscando nuevos clips")' in source
+    assert 'self.stage_var.set("Procesando clip")' in source
+    assert 'self.stage_var.set("Esperando procesamiento")' in source
     assert 'self.root.after(0, self._drain_output_queue)' in source
     assert '("pipeline", "⚡", "Pipeline")' not in source
     assert 'REQUEST FAILED' in source
