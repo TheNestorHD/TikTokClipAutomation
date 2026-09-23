@@ -37,7 +37,7 @@ np = None
 # ============================================================
 from dotenv import load_dotenv, set_key
 
-APP_VERSION = "0.5.4"
+APP_VERSION = "0.5.5"
 if getattr(sys, "frozen", False):
     APP_DIR = Path(sys.executable).resolve().parent
 else:
@@ -7601,9 +7601,61 @@ class TikTokClipAutomationApp:
     # Live dashboard
     # --------------------------------------------------------
 
+    def _update_stage_from_runtime(self, stats):
+        """Actualiza la etapa según el estado real, no según el último log visto."""
+        if not self.running:
+            self.stage_var.set("Esperando")
+            return
+
+        registry = PIPELINE_REGISTRY or {}
+
+        if any(
+            record.get("status") == "processing"
+            for record in registry.values()
+        ):
+            self.stage_var.set("Procesando clip")
+            return
+
+        if any(
+            record.get("status") == "downloading"
+            for record in registry.values()
+        ):
+            self.stage_var.set("Descargando")
+            return
+
+        if any(
+            item.get("status") == "uploading"
+            for item in (
+                cargar_json(
+                    TIKTOK_UPLOAD_REGISTRY,
+                    {"items": {}},
+                ).get("items", {}) or {}
+            ).values()
+        ):
+            self.stage_var.set("Publicando en TikTok")
+            return
+
+        if any(
+            record.get("status") == "process_queued"
+            for record in registry.values()
+        ):
+            self.stage_var.set("Esperando procesamiento")
+            return
+
+        if stats.get("tiktok_pending", 0) > 0:
+            self.stage_var.set("Esperando TikTok")
+            return
+
+        if stats.get("download_pending", 0) > 0:
+            self.stage_var.set("Esperando descarga")
+            return
+
+        self.stage_var.set("Buscando nuevos clips")
+
     def _refresh_views(self):
         try:
             stats = _pipeline_stats()
+            self._update_stage_from_runtime(stats)
             dq = stats["download_pending"]
             pq = stats["process_pending"]
 
