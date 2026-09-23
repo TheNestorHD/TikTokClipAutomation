@@ -5132,7 +5132,7 @@ def _parse_tiktok_draft_count_texts(texts) -> list[tuple[int, str]]:
     import re
 
     pattern = re.compile(
-        r"^\\s*(?:Drafts|Borradores)\\s*:?[\\s]*(\\d+)\\s*$",
+        r"^\s*(?:Drafts|Borradores)\s*:?\s*(\d+)\s*$",
         re.IGNORECASE,
     )
     matches = []
@@ -5213,7 +5213,7 @@ def fetch_tiktok_draft_count(log=print) -> int | None:
                 try:
                     fallback = page.get_by_text(
                         re.compile(
-                            r"\\b(?:Drafts|Borradores)\\s*:?[\\s]*\\d+\\b",
+                            r"\b(?:Drafts|Borradores)\s*:?\s*\d+\b",
                             re.IGNORECASE,
                         )
                     )
