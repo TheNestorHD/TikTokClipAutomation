@@ -3533,8 +3533,7 @@ def watch_kick_clips(stop_event=None, on_processed=None):
                 )
 
                 print(
-                    f"
-🎬 Procesando en secuencia: "
+                    f"🎬 Procesando en secuencia: "
                     f"{job.get('title') or path.name}"
                 )
 
@@ -5582,11 +5581,21 @@ class TikTokUploadManager:
         return self._apply_draft_count(fetch_tiktok_draft_count(log=self.log))
 
     def _draft_monitor_worker(self):
+        # Consulta inmediata al arrancar y luego cada TIKTOK_DRAFT_REFRESH_SECONDS
+        # (default 30s). Solo corre en modo borradores (TIKTOK_AUTO_UPLOAD=false).
+        interval = max(15, int(TIKTOK_DRAFT_REFRESH_SECONDS or 30))
         self.log(
-            f"🔎 Monitor de borradores activo: consulta cada "
-            f"{TIKTOK_DRAFT_REFRESH_SECONDS}s."
+            f"🔎 Monitor de borradores activo: consulta inmediata y luego cada "
+            f"{interval}s."
         )
-        while not self.stop_event.wait(TIKTOK_DRAFT_REFRESH_SECONDS):
+        # Primera consulta al instante (no esperar el intervalo)
+        try:
+            self.refresh_draft_count()
+        except Exception as exc:
+            self.log(f"⚠️  Monitor de borradores (consulta inicial): {exc}")
+        self.wake_event.set()
+
+        while not self.stop_event.wait(interval):
             try:
                 self.refresh_draft_count()
             except Exception as exc:
@@ -7806,7 +7815,7 @@ def reload_config_from_env():
     TIKTOK_PROCESSING_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_PROCESSING_TIMEOUT_SECONDS", 180))
     TIKTOK_CONFIRM_TIMEOUT_SECONDS = max(30, env_int("TIKTOK_CONFIRM_TIMEOUT_SECONDS", 90))
     TIKTOK_UPLOAD_CHECK_SECONDS = max(5, env_int("TIKTOK_UPLOAD_CHECK_SECONDS", 30))
-TIKTOK_DRAFT_REFRESH_SECONDS = max(15, env_int("TIKTOK_DRAFT_REFRESH_SECONDS", 30))
+    TIKTOK_DRAFT_REFRESH_SECONDS = max(15, env_int("TIKTOK_DRAFT_REFRESH_SECONDS", 30))
     FFMPEG_PRIORITY = env_value("FFMPEG_PRIORITY", "idle").strip().lower()
     if FFMPEG_PRIORITY not in {"normal", "below_normal", "idle"}:
         FFMPEG_PRIORITY = "idle"
