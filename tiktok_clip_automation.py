@@ -2798,7 +2798,6 @@ PIPELINE_PROCESS_PENDING_STATUSES = {
     "downloaded",
     "process_queued",
     "processing",
-    "awaiting_tiktok",
 }
 
 
